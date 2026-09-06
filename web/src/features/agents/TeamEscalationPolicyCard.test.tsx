@@ -12,13 +12,11 @@ const template = {
 const empty = {
   team: 'engineering' as const, target_manager: 'engineering_manager' as const,
   can_mutate: true as const, bootstrap_required: true as const,
-  activation_guard: { ready: false, reason: 'production verification required' },
   bootstrap_template: template,
 };
 const active = {
   ...empty,
   bootstrap_required: undefined,
-  activation_guard: { ready: true, reason: '' },
   active: {
     activation_id: 'APA-active', epoch: 7, action: 'activate' as const,
     created_at: '2026-09-02T00:00:00Z', actor_attribution: 'shared local operator credential' as const,
@@ -32,11 +30,15 @@ const active = {
 const query = { data: empty as typeof empty | typeof active | undefined, isLoading: false, isError: false, error: null, refetch: vi.fn() };
 const create = { mutateAsync: vi.fn(), isPending: false };
 const activate = { mutateAsync: vi.fn(), isPending: false };
+const history = { data: { pages: [{ items: [] as Array<Record<string, unknown>>, next_cursor: null as string | null }] }, isLoading: false, isError: false, error: null, fetchNextPage: vi.fn(), hasNextPage: false, isFetchingNextPage: false };
+const outcomes = { data: { pages: [{ items: [] as Array<Record<string, unknown>>, next_cursor: null as string | null }] }, isLoading: false, isError: false, error: null, fetchNextPage: vi.fn(), hasNextPage: false, isFetchingNextPage: false };
 
 vi.mock('@/hooks/authorityPolicy', () => ({
   useTeamEscalationPolicy: () => query,
   useCreateTeamEscalationPolicyRelease: () => create,
   useActivateTeamEscalationPolicyRelease: () => activate,
+  useTeamEscalationPolicyHistory: () => history,
+  useTeamEscalationPolicyOutcomes: () => outcomes,
 }));
 
 const agent = { name: 'engineering_manager', team: 'engineering', role: 'manager' };
@@ -46,6 +48,8 @@ describe('TeamEscalationPolicyCard', () => {
     query.data = empty; query.isLoading = false; query.isError = false; query.error = null;
     query.refetch.mockReset();
     create.mutateAsync.mockReset(); activate.mutateAsync.mockReset();
+    history.data.pages = [{ items: [], next_cursor: null }]; history.isLoading = false; history.isError = false; history.hasNextPage = false; history.isFetchingNextPage = false; history.fetchNextPage.mockReset();
+    outcomes.data.pages = [{ items: [], next_cursor: null }]; outcomes.isLoading = false; outcomes.isError = false; outcomes.hasNextPage = false; outcomes.isFetchingNextPage = false; outcomes.fetchNextPage.mockReset();
   });
 
   it('retries a load error and recovers through loading to loaded data on the same mount', async () => {
@@ -72,7 +76,6 @@ describe('TeamEscalationPolicyCard', () => {
     expect(screen.getByText(/shared local operator credential/i)).toBeInTheDocument();
     expect(screen.getByText(/No active release/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Save & activate' })).toBeDisabled();
-    expect(screen.getByText(/Activation unavailable/)).toHaveTextContent('production verification required');
   });
 
   it('preserves dirty draft on conflict and saves an immutable inactive version', async () => {
@@ -110,9 +113,64 @@ describe('TeamEscalationPolicyCard', () => {
     expect(save).toBeDisabled(); expect(saveAndActivate).toBeDisabled();
     fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'Edited policy' } });
     expect(save).toBeEnabled(); expect(saveAndActivate).toBeEnabled();
-    expect(screen.getByRole('button', { name: 'Reactivate older version' })).toHaveAttribute(
-      'title', 'Rollback selection and history arrive in S6',
-    );
+    expect(screen.getByText('No immutable releases yet.')).toBeInTheDocument();
+  });
+
+  it('renders immutable history, receipt-incomplete outcomes, and confirms rollback', async () => {
+    query.data = active;
+    history.data.pages[0].items = [{ release_id: 'APR-old', policy_id: 'p', version: 2,
+      policy_digest: 'abcdef1234567890', release_created_at: '2026-09-01',
+      actor_attribution: 'shared local operator credential', activation: {
+        id: 'APA-old', epoch: 2, action: 'activate', digest: 'd', created_at: '2026-09-01',
+      } }];
+    outcomes.data.pages[0].items = [{ candidate_id: 'AUTH-1', disposition: null,
+      disposition_code: null, root_task_id: 'TASK-1', manager_session_id: 'sess-1',
+      release_id: null, receipt_state: 'receipt_incomplete' }];
+    activate.mutateAsync.mockResolvedValueOnce({});
+    render(<TeamEscalationPolicyCard agent={agent} />);
+    expect(await screen.findByText(/v2 · APR-old/)).toBeInTheDocument();
+    expect(screen.getByText('receipt_incomplete')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Reactivate v2' }));
+    expect(screen.getByRole('dialog')).toHaveTextContent('Reactivate immutable version 2');
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+    await waitFor(() => expect(activate.mutateAsync).toHaveBeenCalledWith(expect.objectContaining({
+      body: expect.objectContaining({ release_id: 'APR-old', expected_previous_epoch: 7,
+        action: 'reactivate_rollback' }),
+    })));
+  });
+
+  it('loads independent second pages without duplicates or loss', async () => {
+    query.data = active;
+    history.data.pages = [{ items: [{ release_id: 'APR-2', policy_id: 'p', version: 2, policy_digest: '2'.repeat(64), release_created_at: 'x', actor_attribution: 'shared local operator credential', activation: null }], next_cursor: 'history-cursor' }];
+    outcomes.data.pages = [{ items: [{ candidate_id: 'AUTH-2', disposition: 'continue_same_root', disposition_code: 'continue_same_root', root_task_id: 'TASK-2', manager_session_id: 'sess-2', release_id: 'APR-2', receipt_state: 'complete' }], next_cursor: 'outcome-cursor' }];
+    history.hasNextPage = true; outcomes.hasNextPage = true;
+    const view = render(<TeamEscalationPolicyCard agent={agent} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Load more policy history' }));
+    expect(history.fetchNextPage).toHaveBeenCalledOnce();
+    history.data.pages.push({ items: [{ release_id: 'APR-1', policy_id: 'p', version: 1, policy_digest: '1'.repeat(64), release_created_at: 'x', actor_attribution: 'shared local operator credential', activation: null }], next_cursor: null });
+    history.hasNextPage = false;
+    view.rerender(<TeamEscalationPolicyCard agent={agent} />);
+    expect(screen.getByText(/v2 · APR-2/)).toBeInTheDocument();
+    expect(screen.getByText(/v1 · APR-1/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Load more evaluation outcomes' }));
+    expect(outcomes.fetchNextPage).toHaveBeenCalledOnce();
+    expect(screen.getByRole('button', { name: 'Load more policy history' })).toBeDisabled();
+  });
+
+  it('preserves each stream and retries its failed cursor independently', async () => {
+    query.data = active;
+    history.data.pages = [{ items: [{ release_id: 'APR-2', policy_id: 'p', version: 2, policy_digest: '2'.repeat(64), release_created_at: 'x', actor_attribution: 'shared local operator credential', activation: null }], next_cursor: 'history-cursor' }];
+    outcomes.data.pages = [{ items: [{ candidate_id: 'AUTH-2', disposition: 'continue_same_root', disposition_code: 'continue_same_root', root_task_id: 'TASK-2', manager_session_id: 'sess-2', release_id: 'APR-2', receipt_state: 'complete' }], next_cursor: 'outcome-cursor' }];
+    history.hasNextPage = true; outcomes.hasNextPage = true;
+    history.isError = true; outcomes.isError = true;
+    render(<TeamEscalationPolicyCard agent={agent} />);
+    expect(screen.getByText(/v2 · APR-2/)).toBeInTheDocument();
+    expect(screen.getByText(/task TASK-2/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry loading policy history' }));
+    expect(history.fetchNextPage).toHaveBeenCalledOnce();
+    expect(outcomes.fetchNextPage).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry loading evaluation outcomes' }));
+    expect(outcomes.fetchNextPage).toHaveBeenCalledOnce();
   });
 
   it.each([

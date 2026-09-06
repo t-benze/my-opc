@@ -1,0 +1,9 @@
+# path<TAB>line<TAB>column<TAB>value<TAB>specific temporary reason
+design-system/layouts/AppShell/TopBar.tsx	90	28	#4ade80	Retired TopBar Brandmark residue preserved until the later approved cleanup unit
+design-system/layouts/AppShell/TopBar.tsx	113	34	#4ade80	Retired TopBar Happy wordmark residue preserved until the later approved cleanup unit
+features/todos/strings.ts	70	21	#2b5c3a	Todos active-status text residue preserved for the later approved Todos unit
+features/todos/strings.ts	70	34	#e3efe5	Todos active-status background residue preserved for the later approved Todos unit
+features/todos/strings.ts	73	21	#575249	Todos failed-status text residue preserved for the later approved Todos unit
+features/todos/strings.ts	73	34	#f3e8d6	Todos failed-status background residue preserved for the later approved Todos unit
+features/todos/strings.ts	78	21	#575249	Todos inactive-status text residue preserved for the later approved Todos unit
+features/todos/strings.ts	78	34	#efece2	Todos inactive-status background residue preserved for the later approved Todos unit

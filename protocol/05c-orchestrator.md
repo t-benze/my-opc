@@ -307,6 +307,8 @@ There are four types of permission blocks, each handled differently:
 
 ### THR-181 pre-escalation authority evaluation (Track A)
 
+**S6a semantic-decision supersession.** For a newly launched eligible manager with an active immutable policy, the semantic result is the strict closed `manager_self_evaluation` carried by that manager's authenticated completion. It is bound to task-result/session/release/activation/contract and the effective manager provider/executor/model. Production constructs no subprocess evaluator. Missing, malformed, extra-field, mismatched, stale, replayed, ambiguous, and low-confidence results fail closed with digest-only diagnostics. The injectable evaluator remains only for strict isolated tests and legacy static-policy compatibility. This paragraph supersedes older “production evaluator” wording below; every daemon-owned gate, ordering rule, and denominator invariant remains normative.
+
 **Immutable release-controlled policy authority.** Before a **current manager-owned Engineering root's** proposed escalation (`decision.action == "escalate"`) is committed, including a thread-originated current root, the orchestrator runs exactly **one audited LLM authority evaluation** of the proposed reason against the immutable, release-controlled Engineering policy `engineering/pre-escalation-authority@v1` (`runtime/orchestrator/authority_policy.py`). The policy is code-and-deploy controlled under the accepted shared-identity posture: there is no mutable database/config activation switch, and agents/managers cannot self-modify or self-activate their governing policy. Historical census eligibility is NOT a prerequisite and is NEVER consulted — reachability depends only on a release-controlled policy existing for the manager's team and the root being current/manager-owned. Thread id/origin remain structured provenance, not an eligibility or final-consumption fence; they do not relax same-root identity or the no-revisit/no-successor/no-supersession/no-fresh-root-replacement rules.
 
 **Semantic authority only.** The policy is semantic authority; **server-owned mechanical fences are non-overridable** — cancellation, budget exhaustion, protected gates, root-only escalation, same-root-only continuation, and every server-derived predicate bind regardless of any policy output, and no policy output may override a mechanical fence. The proposed escalation reason is **untrusted input**: it can never establish a server fact, waive a fence, or widen the hook's reach; only its digest is persisted. A committed escalation remains founder/human-resolved.
@@ -348,9 +350,9 @@ seal, and full-history validators; missing/corrupt/incoherent state is the
 sanitized `policy_store_unavailable` failure. The S2 read itself neither
 creates nor activates policy. S3 exposes immutable release creation and thus
 truthfully reports `can_mutate=true` in both empty and active responses; that
-capability never implies activation. Its activation guard remains not ready with
-`TASK-6335 production verification required`; runtime injection and candidate
-pin production integration remain later slices.
+capability never implies activation. S4/S6a shipped runtime injection,
+candidate pins, and manager self-evaluation; S7 adds the bounded operator
+projection and explicit founder-authorized activation described below.
 
 **Dark policy mutation API (S3).** `POST .../releases` server-owns the exact
 Engineering team/policy identity and next version, validates the closed typed
@@ -364,13 +366,31 @@ attribution, with that closed receipt derived and verified at the transaction
 owner rather than accepted from a caller. The transaction resolves a request
 id's exact request-digest replay before validating the mutable active base; a
 new request still validates that base and a changed digest still conflicts.
-`POST .../activations` accepts the CAS/reactivation contract but, while the
-stable production-verification guard is closed, returns `412
-activation_guard_not_ready` before any release lookup or write, leaving zero
-activation/audit residue and no guessed-release oracle. The S1 store owns the
-separately testable sealed CAS, exact replay, stale epoch, same-team linkage,
-and older-version rollback transaction for the later guard opening; no route
-SQL, runtime injection, or production activation is added.
+`POST .../activations` accepts the CAS/reactivation contract as an explicit
+founder-authorized action. The authenticated route enforces the exact
+Engineering-manager allowlist and closed request model before proceeding
+through the S1 store's sealed CAS, exact replay, stale-epoch, same-team, audit,
+and older-version rollback checks without exposing guessed release existence
+as a distinct oracle. Shipping the route is not production activation.
+
+**S6b/S7 projection and activation.** The authenticated Engineering
+Manager surface exposes bounded stable snapshot/keyset pagination, with opaque
+independent cursors and deterministic tie-breakers, for immutable release and
+activation receipts plus secret-free self-evaluation outcomes. Concurrent
+newer inserts are outside the initial traversal snapshot and cannot shift,
+duplicate, or omit its older rows. It projects
+only durable release/activation/policy, prompt, provider, executor, model,
+task/result/session/thread/hook/envelope pins and emits `receipt_incomplete`
+when a causal join is absent or corrupt; raw evaluator output, rationale,
+prompts, policy prose, and secrets are prohibited. Workers and ineligible
+managers receive the same surface-unavailable 404 and omit the surface in the
+Agent payload and DOM. Rollback creates a new monotonic epoch pointing at an
+older immutable release. Eligibility remains explicitly
+`engineering/engineering_manager`; the role/team seam is reusable but enables
+no other manager. Activation is an explicit founder-authorized operator act
+subject to the ordinary daemon authentication, allowlist, closed request,
+immutable release linkage, exact replay/idempotency, audit, and CAS fences.
+Code landing or redeploy is not production activation.
 
 Release identity is derived at the typed store boundary, never supplied as a
 second caller-controlled authority. Its canonical JSON and SHA-256 cover
@@ -442,6 +462,30 @@ verdict, output snapshot, and timestamp; the route re-derives and compares the
 same record, root, owner, thread, invocation, escalation, lineage, and
 freshness server-side. Later descendants, unrelated terminal records, prose,
 brief text, KB text, and quotes are audit context only, never authority.
+
+### THR-225 task-followup replacement root
+
+An authoritative pending `TASK_FOLLOWUP` invocation owned by the dispatching
+team manager may dispatch one corrected replacement root for its causal
+thread-dispatched root. The one-replacement budget and permanent lineage fence
+come only from existing persisted invocation, system-message, task-link, thread,
+and audit state. A single `BEGIN IMMEDIATE` transaction revalidates pending
+token identity/purpose, manager authority held by the route's teams-registry
+lock, open thread, causal root, and unspent budget, then creates a true root
+(`parent_task_id IS NULL`) with its thread link, invocation marker, system
+message, and audits. Queue notification is post-commit.
+
+The replacement root and all supported persisted descendants, retry/revisit
+ancestry, chain/fanout legs, and terminal followups are forever ineligible.
+Manager supersession is a separate product path that rejects every
+thread-originated root, so it cannot create a successor of a THR-225
+replacement and is not part of this acceptance matrix. Replay/concurrent losers return
+`task_followup_dispatch_already_used` without mutation. Malformed/noncausal or
+stale tokens fail closed; archive/cancellation ordering is decided by the final
+transactional revalidation. No migration/backfill or column reinterpretation is
+involved, so historical v0 DB-backed and v1 flat/single-org stores retain their
+existing behavior; absence of the required persisted evidence fails closed for
+this new edge only.
 
 Absolute human blockers remain escalated: schema/migration or overloaded
 meaning; permission/sandbox/allow-rule changes; auth, credentials, security,

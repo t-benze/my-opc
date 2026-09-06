@@ -221,49 +221,11 @@ def _consume_zombie_fingerprint(
     _consume_completion_report (the same tail that run_step_impl uses for
     normal completions).
     """
-    import json as _json
-    from runtime.models import CompletionReport, LocalCiEvidence, NextStep
+    from runtime.orchestrator.orchestrator import completion_report_from_result_row
 
-    _raw_decision = fingerprint.get("decision_json")
-    _decision: NextStep | None = None
-    if _raw_decision:
-        try:
-            _parsed = _json.loads(_raw_decision)
-            if isinstance(_parsed, dict):
-                _decision = NextStep(**_parsed)
-        except Exception:
-            _decision = None
-
-    _risks = fingerprint.get("risks_flagged")
-    if isinstance(_risks, str):
-        try:
-            _risks = _json.loads(_risks)
-        except Exception:
-            _risks = []
-
-    # Safely parse local_ci from the fingerprint row.
-    _local_ci_raw = fingerprint.get("local_ci")
-    _local_ci: LocalCiEvidence | None = None
-    if _local_ci_raw:
-        try:
-            _parsed = _json.loads(_local_ci_raw)
-            if isinstance(_parsed, dict):
-                _local_ci = LocalCiEvidence(**_parsed)
-        except Exception:
-            pass
-
-    orphaned_report = CompletionReport(
-        task_id=task_id,
-        agent=fingerprint.get("agent") or (task.assigned_agent or "unknown"),
-        status=fingerprint.get("status") or "completed",
-        confidence=fingerprint.get("confidence_score") or 0,
-        output_summary=fingerprint.get("output_summary") or "",
-        verdict=fingerprint.get("verdict"),
-        decision=_decision,
-        risks_flagged=_risks or [],
-        waiting_on_job_ids=fingerprint.get("waiting_on_job_ids") or [],
-        output_dir=fingerprint.get("output_dir"),
-        local_ci=_local_ci,
+    orphaned_report = completion_report_from_result_row(
+        task_id, fingerprint,
+        fallback_agent=task.assigned_agent or "unknown",
     )
     from runtime.orchestrator.run_step import _consume_completion_report
     _consume_completion_report(

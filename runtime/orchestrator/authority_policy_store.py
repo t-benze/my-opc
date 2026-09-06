@@ -8,6 +8,9 @@ this store only after resolving an active DB release and activation.
 
 from __future__ import annotations
 
+import base64
+import json
+
 from runtime.infrastructure.database import Database
 from runtime.models import (
     AuthorityCandidate,
@@ -75,6 +78,105 @@ class AuthorityPolicyStore:
 
     def get_current_activation(self, team: str) -> AuthorityPolicyActivation | None:
         return self._db.get_current_authority_policy_activation(team)
+
+    @staticmethod
+    def _encode_cursor(payload: dict) -> str:
+        raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+    @staticmethod
+    def _decode_cursor(cursor: str, *, stream: str) -> dict:
+        try:
+            raw = base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4))
+            payload = json.loads(raw)
+        except Exception as exc:
+            raise ValueError("invalid pagination cursor") from exc
+        if not isinstance(payload, dict) or payload.get("v") != 1 or payload.get("stream") != stream:
+            raise ValueError("invalid pagination cursor")
+        return payload
+
+    @staticmethod
+    def _cursor_int(payload: dict, key: str) -> int:
+        value = payload.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError("invalid pagination cursor")
+        return value
+
+    @staticmethod
+    def _cursor_str(payload: dict, key: str) -> str:
+        value = payload.get(key)
+        if not isinstance(value, str) or not value or len(value) > 256:
+            raise ValueError("invalid pagination cursor")
+        return value
+
+    def list_history(self, team: str, *, cursor: str | None, limit: int) -> tuple[list[dict], str | None]:
+        """Return an immutable-snapshot, deterministic newest-first page."""
+        if cursor is None:
+            snapshot_version, snapshot_epoch = self._db.get_authority_policy_history_snapshot(team)
+            after = None
+        else:
+            token = self._decode_cursor(cursor, stream="history")
+            if token.get("team") != team:
+                raise ValueError("invalid pagination cursor")
+            try:
+                snapshot_version = self._cursor_int(token, "sv")
+                snapshot_epoch = self._cursor_int(token, "se")
+                after = (
+                    self._cursor_int(token, "av"), self._cursor_int(token, "ae"),
+                    self._cursor_str(token, "ar"), token.get("aa"),
+                )
+                if not isinstance(after[3], str) or len(after[3]) > 256:
+                    raise ValueError("invalid pagination cursor")
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError("invalid pagination cursor") from exc
+        rows = self._db.list_authority_policy_history(
+            team, snapshot_version=snapshot_version, snapshot_epoch=snapshot_epoch,
+            after_version=None if after is None else after[0],
+            after_epoch=None if after is None else after[1],
+            after_release_id=None if after is None else after[2],
+            after_activation_id=None if after is None else after[3], limit=limit + 1,
+        )
+        page = rows[:limit]
+        if len(rows) <= limit or not page:
+            return page, None
+        last = page[-1]
+        return page, self._encode_cursor({
+            "v": 1, "stream": "history", "team": team,
+            "sv": snapshot_version, "se": snapshot_epoch,
+            "av": last["version"], "ae": last["epoch"] or 0,
+            "ar": last["release_id"], "aa": last["activation_id"] or "",
+        })
+
+    def list_outcomes(self, team: str, *, cursor: str | None, limit: int) -> tuple[list[dict], str | None]:
+        """Return secret-free receipts from a stable initial snapshot."""
+        if cursor is None:
+            snapshot = self._db.get_authority_policy_outcomes_snapshot(team)
+            if snapshot is None:
+                return [], None
+            after = None
+        else:
+            token = self._decode_cursor(cursor, stream="outcomes")
+            if token.get("team") != team:
+                raise ValueError("invalid pagination cursor")
+            try:
+                snapshot = (self._cursor_str(token, "sc"), self._cursor_str(token, "si"))
+                after = (self._cursor_str(token, "ac"), self._cursor_str(token, "ai"))
+            except (KeyError, TypeError) as exc:
+                raise ValueError("invalid pagination cursor") from exc
+        rows = self._db.list_authority_policy_outcomes(
+            team, snapshot_created_at=snapshot[0], snapshot_id=snapshot[1],
+            after_created_at=None if after is None else after[0],
+            after_id=None if after is None else after[1], limit=limit + 1,
+        )
+        page = rows[:limit]
+        if len(rows) <= limit or not page:
+            return page, None
+        last = page[-1]
+        return page, self._encode_cursor({
+            "v": 1, "stream": "outcomes", "team": team,
+            "sc": snapshot[0], "si": snapshot[1],
+            "ac": last["created_at"], "ai": last["id"],
+        })
 
     def get_candidate_pin(self, candidate_id: str) -> AuthorityCandidatePolicyPin | None:
         return self._db.get_authority_candidate_policy_pin(candidate_id)

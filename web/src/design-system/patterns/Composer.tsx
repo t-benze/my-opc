@@ -1,5 +1,5 @@
 /**
- * Composer — compact single-line rounded input with an INLINE attach icon and
+ * Composer — compact single-line 18px-rounded input with an INLINE attach icon and
  * a circular send button (THR-061 a-thread-detail). Per DESIGN.md
  * `components.textarea` + `components.button.primary`. Used at the foot of the
  * threads detail pane.
@@ -195,9 +195,9 @@ export function Composer({
       )}
 
       {/* Compact rounded input: inline attach icon + textarea + circular send.
-          Full-stadium pill (a-thread-detail) — reads as a single-line input and
+          Founder-approved 18px local extension — reads as a single-line input and
           grows gracefully for the rare Shift+Enter multi-line draft. */}
-      <div className="border-border-default bg-surface-raised focus-within:border-accent-default flex items-end gap-1 rounded-3xl border py-1 pr-1 pl-2 transition-colors">
+      <div className="border-border-default bg-surface-raised focus-within:border-accent-default flex items-end gap-1 rounded-lg border py-1 pr-1 pl-2 transition-colors">
         <label
           className="text-text-muted hover:text-text-secondary hover:bg-surface-hover mb-0.5 inline-flex h-9 w-9 shrink-0 cursor-pointer items-center justify-center rounded-full transition-colors"
           title="Attach files"

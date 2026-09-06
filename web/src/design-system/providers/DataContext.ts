@@ -400,6 +400,10 @@ export interface AuthorityPolicyApi {
       action: 'activate' | 'reactivate_rollback'; acknowledge_shared_credential_attribution: true } },
     unknown
   >;
+  useTeamEscalationPolicyHistory: (agent: { name: string; team: string; role: string } | undefined) =>
+    InfiniteQueryLike<import('@/lib/api/authorityPolicy').AuthorityPolicyHistoryResponse>;
+  useTeamEscalationPolicyOutcomes: (agent: { name: string; team: string; role: string } | undefined) =>
+    InfiniteQueryLike<import('@/lib/api/authorityPolicy').AuthorityPolicyOutcomesResponse>;
 }
 
 export interface AgentsRoutes {

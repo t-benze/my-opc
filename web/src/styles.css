@@ -3,6 +3,13 @@
 @import "highlight.js/styles/github-dark-dimmed.css";
 
 @layer components {
+  /* Named to avoid tailwind-merge conflating custom `text-body-sm` sizing
+     with semantic `text-*` color utilities on the same Button. */
+  .pasture-button-type {
+    font-size: var(--text-body-sm);
+    line-height: var(--text-body-sm--line-height);
+  }
+
   .input {
     @apply rounded border border-border bg-bg-raised px-2 py-1.5 text-sm text-fg placeholder:text-fg-subtle focus:border-accent focus:outline-none disabled:opacity-50;
   }

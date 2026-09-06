@@ -43,7 +43,7 @@ function detectOpenMention(text: string, caret: number):
 }
 
 const DEFAULT_CLASSNAME =
-  'border-border-default bg-surface-raised text-body-lg text-text-primary placeholder:text-text-muted focus:border-accent-default w-full resize-none rounded-md border px-3 py-2 focus:outline-none disabled:opacity-50';
+  'border-border-default bg-surface-raised text-body-lg text-text-primary placeholder:text-text-muted focus:border-accent-default w-full resize-none rounded-sm border px-3 py-2 focus:outline-none disabled:opacity-50';
 
 export interface MentionTextareaProps {
   value: string;

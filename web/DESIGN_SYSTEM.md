@@ -6,6 +6,10 @@ Feature compositions keep using the stable `@/design-system/...` import paths.
 ## Tokens and boundaries
 
 - `src/design-system/tokens/tokens.css` is the source of new raw colors.
+- `brand-foreground` is the single semantic foreground for the HappyRanch
+  lockup. Its explicit light/dark values are held to at least 4.5:1 against
+  the live Sidebar (`bg-bg-subtle`) and Onboarding (`bg-surface-canvas`)
+  backgrounds; it is intentionally distinct from the generic UI accent.
   Components and stories consume semantic utilities; the branch-aware check in
   `scripts/verify-design-system.sh` rejects newly added CSS-like hex values
   elsewhere without confusing issue references such as `#302` for colors.
@@ -82,13 +86,13 @@ and retry is local state, so Storybook remains daemon-isolated.
 
 ## Coverage ledger
 
-**44 reusable components: 40 story-covered, 4 justified exclusions.** Stories
+**44 reusable components: 41 story-covered, 3 justified exclusions.** Stories
 preserve the former catalogue's descriptions, examples, variants, and token
 visibility through titles, docs, controls, and representative renders.
 
 | Reusable export | Story or exclusion | Representative states / variants | Tokens |
 |---|---|---|---|
-| `Button` | [source:primitives/Button.tsx#Button] [story:primitives/Button.coverage.stories.tsx#Coverage] Primitives / Button States | default, disabled; variant/size controls | `components.button` |
+| `Button` | [source:primitives/Button.tsx#Button] [story:primitives/Button.coverage.stories.tsx#Coverage] Primitives / Button States | default/secondary/outline/ghost/destructive/destructive-outline/link; default/sm/lg/icon; loading, disabled, icon, focus, `asChild` | `components.button` |
 | `Dialog` | [source:primitives/Dialog.tsx#Dialog] [story:primitives/Dialog.coverage.stories.tsx#Coverage] Primitives / Dialog Interaction | trigger → portal | `components.dialog` |
 | `Drawer` | [source:primitives/Drawer.tsx#Drawer] [story:primitives/Drawer.coverage.stories.tsx#Coverage] Primitives / Drawer Interaction | trigger → drawer | `components.drawer` |
 | `DropdownMenu` | [source:primitives/DropdownMenu.tsx#DropdownMenu] [story:primitives/DropdownMenu.coverage.stories.tsx#Coverage] Primitives / Dropdown Menu Interaction | trigger, populated actions | `components.dropdown_menu` |
@@ -102,20 +106,20 @@ visibility through titles, docs, controls, and representative renders.
 | `AgentChip` | [source:patterns/AgentChip.tsx#AgentChip] [story:patterns/AgentChip.coverage.stories.tsx#Coverage] Patterns / Agent Chip Roles | founder, manager, worker | `components.agent_chip` |
 | `AuditRow` | [source:patterns/AuditRow.tsx#AuditRow] [story:patterns/AuditRow.coverage.stories.tsx#Coverage] Patterns / Audit Row Density | complete audit/job fixtures; comfortable, compact, expandable | `components.audit_row` |
 | `CommandPalette` | [source:patterns/CommandPalette.tsx#CommandPalette] [story:patterns/CommandPalette.coverage.stories.tsx#Coverage] Patterns / Command Palette Populated | open, populated, searchable | `components.dialog` |
-| `Composer` | [source:patterns/Composer.tsx#Composer] [story:patterns/Composer.coverage.stories.tsx#Coverage] Patterns / Composer States | ready, abort, error/draft | input/button tokens |
+| `Composer` | [source:patterns/Composer.tsx#Composer] [story:patterns/Composer.coverage.stories.tsx#Coverage] Patterns / Composer States | ready, abort, error/draft; 18px local-extension shell | input/button, `--radius-lg` |
 | `CrescentMoonBadge` | [source:patterns/CrescentMoonBadge.tsx#CrescentMoonBadge] [story:patterns/CrescentMoonBadge.coverage.stories.tsx#Coverage] Patterns / Crescent Moon Badge State | present | `components.badge` |
 | `EmptyState` | [source:patterns/EmptyState.tsx#EmptyState] [story:patterns/EmptyState.coverage.stories.tsx#Coverage] Patterns / Empty State With Action | empty with CTA | `components.empty_state` |
 | `FilterSidebar` | [source:patterns/FilterSidebar.tsx#FilterSidebar] [story:patterns/FilterSidebar.coverage.stories.tsx#Coverage] Patterns / Filter Sidebar Interaction | all/selected, counts | `components.filter_sidebar` |
 | `FormField` | [source:patterns/FormField.tsx#FormField] [story:patterns/FormField.coverage.stories.tsx#Coverage] Patterns / Form Field States | normal, error | input/label tokens |
 | `HelpSheet` | [source:patterns/HelpSheet.tsx#HelpSheet] [story:patterns/HelpSheet.coverage.stories.tsx#Coverage] Patterns / Help Sheet Interaction | open shortcuts | dialog/kbd tokens |
 | `IdBadge` | [source:patterns/IdBadge.tsx#IdBadge] [story:patterns/IdBadge.coverage.stories.tsx#Coverage] Patterns / Id Badge Kinds | thread, task | `components.badge` |
-| `InboxRow` | [source:patterns/InboxRow.tsx#InboxRow] [story:patterns/InboxRow.coverage.stories.tsx#Coverage] Patterns / Inbox Row States | active/open, archived/thread | `components.inbox_row` |
+| `InboxRow` | [source:patterns/InboxRow.tsx#InboxRow] [story:patterns/InboxRow.coverage.stories.tsx#Coverage] Patterns / Inbox Row States | default/thread × active/open/archived; 8px interactive shell, nested pills preserved | `components.inbox_row`, `--radius-sm` |
 | `KbdChip` | [source:patterns/KbdChip.tsx#KbdChip] [story:patterns/KbdChip.coverage.stories.tsx#Coverage] Patterns / Kbd Chip Combinations | key, chord | `components.kbd_chip` |
 | `Markdown` | [source:patterns/Markdown.tsx#Markdown] [story:patterns/Markdown.coverage.stories.tsx#Coverage] Patterns / Markdown Content | heading/list/emphasis/code | typography/code |
 | `MentionAutocomplete` | [source:patterns/MentionAutocomplete.tsx#MentionAutocomplete] [story:patterns/MentionAutocomplete.coverage.stories.tsx#Coverage] Patterns / Mention Autocomplete Populated | populated portal/listbox | surface/border |
 | `MentionTextarea` | [source:patterns/MentionTextarea.tsx#MentionTextarea] [story:patterns/MentionTextarea.coverage.stories.tsx#Coverage] Patterns / Mention Textarea Interaction | editable mention | `components.textarea` |
 | `Mermaid` | [source:patterns/Mermaid.tsx#default] [story:patterns/Mermaid.coverage.stories.tsx#Coverage] Patterns / Mermaid Diagram | loading → diagram | `components.code_block` |
-| `MessageBubble` | [source:patterns/MessageBubble.tsx#MessageBubble] [story:patterns/MessageBubble.coverage.stories.tsx#Coverage] Patterns / Message Bubble Variants | founder, worker, manager, decline, system | `components.message_bubble` |
+| `MessageBubble` | [source:patterns/MessageBubble.tsx#MessageBubble] [story:patterns/MessageBubble.coverage.stories.tsx#Coverage] Patterns / Message Bubble Variants | founder, worker, manager, decline, system; non-system shells remain 18px | `components.message_bubble`, `--radius-lg` |
 | `PageHeader` | [source:patterns/PageHeader.tsx#PageHeader] [story:patterns/PageHeader.coverage.stories.tsx#Coverage] Patterns / Page Header With Actions | metadata/action | heading/caption |
 | `RecipientsInput` | [source:patterns/RecipientsInput.tsx#RecipientsInput] [story:patterns/RecipientsInput.coverage.stories.tsx#Coverage] Patterns / Recipients Input Interaction | editable prefix | mention/surface |
 | `Sparkline` | [source:patterns/Sparkline.tsx#Sparkline] [story:patterns/Sparkline.coverage.stories.tsx#Coverage] Patterns / Sparkline Variants | default/green/yellow/red | semantic tiers |
@@ -124,10 +128,10 @@ visibility through titles, docs, controls, and representative renders.
 | `TaskCard` | [source:patterns/TaskCard.tsx#TaskCard] [story:patterns/TaskCard.coverage.stories.tsx#Coverage] Patterns / Task Card Density | populated/active; comfortable, compact; injected routes | badge/card |
 | `ThreadHeader` | [source:patterns/ThreadHeader.tsx#ThreadHeader] [story:patterns/ThreadHeader.coverage.stories.tsx#Coverage] Patterns / Thread Header States | open/dream/action, archived | thread layout |
 | `TraceTree` | [source:patterns/TraceTree.tsx#TraceTree] [story:patterns/TraceTree.coverage.stories.tsx#Coverage] Patterns / Trace Tree Density | recursive cost fixture; comfortable, compact | `components.trace_tree` |
-| `TypingBubble` | [source:patterns/TypingBubble.tsx#TypingBubble] [story:patterns/TypingBubble.coverage.stories.tsx#Coverage] Patterns / Typing Bubble States | working, queued | info/muted |
+| `TypingBubble` | [source:patterns/TypingBubble.tsx#TypingBubble] [story:patterns/TypingBubble.coverage.stories.tsx#Coverage] Patterns / Typing Bubble States | working, queued; shell remains 18px | info/muted, `--radius-lg` |
 | `AppBar` | [excluded:AppBar] Reads live shell/org/navigation contexts and hosts product commands; AppShell/route tests cover it. | shell context in tests | topbar/grid |
 | `ErrorBoundary` | [excluded:ErrorBoundary] Lifecycle capture/reset is not a static catalogue unit; component and route tests cover error/recovery. | normal/error/reset in tests | feedback |
-| `Sidebar` | [excluded:Sidebar] Reads org/route/responsive/navigation contexts; `Sidebar.test.tsx` and AppShell tests cover it without misleading canned permissions. | desktop/mobile/navigation in tests | sidebar/grid |
+| `Sidebar` | [source:layouts/AppShell/Sidebar.tsx#Sidebar] [story:layouts/AppShell/Sidebar.coverage.stories.tsx#Coverage] Layouts / Sidebar Branches | disabled navigation and footer account; focused enabled-navigation story | sidebar/grid |
 | `TopBar` | [excluded:TopBar] Reads prototype/org route state; prototype/AppShell tests cover its complete shell contract. | shell context in tests | topbar/grid |
 | `ContentWrap` | [source:layouts/ContentWrap/ContentWrap.tsx#ContentWrap] [story:layouts/ContentWrap/ContentWrap.coverage.stories.tsx#Coverage] Layouts / Content Wrap Responsive | bounded responsive content | layout content/wrap |
 | `DashboardLayout` | [source:layouts/DashboardLayout.tsx#DashboardLayout] [story:layouts/DashboardLayout.coverage.stories.tsx#Coverage] Layouts / Dashboard Layout Populated | four populated slots | layout grid |

@@ -16,8 +16,11 @@
  * columns, rounded column-header bar, rounded bordered group-section cards,
  * right-aligned group-by segmented control.
  */
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
+import { AlertCircle, RefreshCw } from 'lucide-react';
 import { Tabs, TabsList, TabsTrigger } from '@/design-system/primitives/Tabs';
+import { Button } from '@/design-system/primitives/Button';
 import { EmptyState } from '@/design-system/patterns/EmptyState';
 import { ContentWrap } from '@/design-system/layouts/ContentWrap/ContentWrap';
 import {
@@ -27,6 +30,7 @@ import {
 } from './TaskListRow';
 import { useTasksRootsInfinite, useTasksRoutes } from '@/hooks/tasks';
 import type { TaskRecord } from '@/lib/api/types';
+import { useOrgSlugOptional } from '@/lib/orgSlug';
 
 type GroupBy = 'status' | 'agent' | 'thread';
 
@@ -170,7 +174,11 @@ const GROUP_ORDER_STATUS: Record<string, number> = {
 
 export function TasksPage(): JSX.Element {
   const [groupBy, setGroupBy] = useState<GroupBy>('status');
+  const [isRetrying, setIsRetrying] = useState(false);
+  const [nextPageError, setNextPageError] = useState(false);
   const routes = useTasksRoutes();
+  const orgSlug = useOrgSlugOptional();
+  const queryClient = useQueryClient();
   const tasksQuery = useTasksRootsInfinite();
 
   const allTasks = useMemo(
@@ -231,22 +239,48 @@ export function TasksPage(): JSX.Element {
   // Sentinel observer for infinite scroll.
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   const { fetchNextPage, hasNextPage, isFetchingNextPage } = tasksQuery;
+  const loadNextPage = useCallback(async () => {
+    setNextPageError(false);
+    try {
+      const result = await fetchNextPage();
+      const failed =
+        typeof result === 'object' &&
+        result !== null &&
+        'isFetchNextPageError' in result &&
+        result.isFetchNextPageError === true;
+      setNextPageError(failed);
+    } catch {
+      setNextPageError(true);
+    }
+  }, [fetchNextPage]);
   useEffect(() => {
     const node = sentinelRef.current;
-    if (!node || !hasNextPage) return;
+    if (!node || !hasNextPage || nextPageError) return;
     const obs = new IntersectionObserver(
       (entries) => {
         if (entries[0]?.isIntersecting && !isFetchingNextPage) {
-          fetchNextPage();
+          void loadNextPage();
         }
       },
       { rootMargin: '200px' },
     );
     obs.observe(node);
     return () => obs.disconnect();
-  }, [fetchNextPage, hasNextPage, isFetchingNextPage]);
+  }, [hasNextPage, isFetchingNextPage, loadNextPage, nextPageError]);
 
   const isLoading = tasksQuery.isLoading;
+  const hasUsableTasks = allTasks.length > 0;
+  const retry = async () => {
+    setIsRetrying(true);
+    try {
+      await queryClient.refetchQueries({
+        queryKey: ['tasks-roots-infinite', orgSlug, undefined],
+        exact: true,
+      });
+    } finally {
+      setIsRetrying(false);
+    }
+  };
 
   return (
     <div className="bg-surface-canvas flex h-full flex-col">
@@ -262,7 +296,7 @@ export function TasksPage(): JSX.Element {
           border-b stays on the outer <header>. */}
       <header className="border-border-default bg-surface-page shrink-0 border-b">
         <ContentWrap>
-        <div className="flex items-start justify-between gap-4">
+        <div data-testid="tasks-page-header" className="flex flex-col items-start justify-between gap-4 sm:flex-row">
           <div className="min-w-0">
             <p className="text-text-muted text-xs font-medium tracking-wide uppercase">
               {eyebrow}
@@ -303,11 +337,51 @@ export function TasksPage(): JSX.Element {
         <ContentWrap>
         {isLoading ? (
           <p className="text-text-muted py-6 text-center text-sm">Loading…</p>
+        ) : tasksQuery.isError && !hasUsableTasks ? (
+          <EmptyState
+            icon={<AlertCircle size={32} className="text-feedback-danger" />}
+            title="Could not load tasks"
+            body="The server returned an error. You can try again."
+            cta={{ label: isRetrying ? 'Retrying…' : 'Retry', onClick: retry }}
+          />
         ) : allTasks.length === 0 ? (
           <EmptyState title="No tasks" body="No tasks match the current filters." />
         ) : (
           <div className="space-y-6">
-            <TaskListColumnHeader />
+            {tasksQuery.isError && !nextPageError && (
+              <div
+                role="alert"
+                className="border-feedback-danger bg-danger-soft flex flex-wrap items-center justify-between gap-3 rounded-lg border p-4"
+              >
+                <div className="flex min-w-0 items-center gap-2">
+                  <AlertCircle className="text-feedback-danger shrink-0" size={18} aria-hidden />
+                  <div>
+                    <p className="text-text-primary text-sm font-medium">Tasks may be out of date</p>
+                    <p className="text-text-secondary text-xs">Some task updates could not be loaded.</p>
+                  </div>
+                </div>
+                <Button size="sm" variant="outline" onClick={retry} loading={isRetrying}>
+                  <RefreshCw size={14} aria-hidden />
+                  Retry
+                </Button>
+              </div>
+            )}
+            <style>{`@media (max-width: 767px) {
+              [data-tasks-responsive-list] > div:first-child { display: none; }
+              [data-tasks-responsive-list] section li > div > a {
+                display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .5rem .75rem; align-items: center;
+              }
+              [data-tasks-responsive-list] section li > div > a > div { width: auto; min-width: 0; }
+              [data-tasks-responsive-list] section li > div > a > div:nth-child(1) { grid-column: 1; grid-row: 1; }
+              [data-tasks-responsive-list] section li > div > a > div:nth-child(2) { grid-column: 2; grid-row: 1; }
+              [data-tasks-responsive-list] section li > div > a > div:nth-child(3) { grid-column: 1 / -1; grid-row: 2; overflow: visible; }
+              [data-tasks-responsive-list] section li > div > a > div:nth-child(3) > span { white-space: normal; overflow: visible; text-overflow: clip; }
+              [data-tasks-responsive-list] section li > div > a > div:nth-child(4) { grid-column: 1; grid-row: 3; }
+              [data-tasks-responsive-list] section li > div > a > div:nth-child(5) { grid-column: 2; grid-row: 3; }
+              [data-tasks-responsive-list] section li > div > a > div:nth-child(6) { grid-column: 2; grid-row: 4; justify-self: end; }
+            }`}</style>
+            <div data-testid="tasks-responsive-list" data-tasks-responsive-list>
+              <TaskListColumnHeader />
             {groups.map(([key, tasks]) => {
               const dimmed = isResolvedGroup(key, groupBy);
               return (
@@ -334,13 +408,29 @@ export function TasksPage(): JSX.Element {
                 </div>
               );
             })}
+            </div>
             <div ref={sentinelRef} aria-hidden className="h-1" />
             {isFetchingNextPage && (
               <p className="text-text-muted py-3 text-center text-sm">
                 Loading more…
               </p>
             )}
-            {!hasNextPage && allTasks.length > 0 && (
+            {nextPageError && (
+              <div role="alert" className="border-feedback-danger bg-danger-soft flex flex-wrap items-center justify-between gap-3 rounded-lg border p-4">
+                <div className="flex min-w-0 items-center gap-2">
+                  <AlertCircle className="text-feedback-danger shrink-0" size={18} aria-hidden />
+                  <div>
+                    <p className="text-text-primary text-sm font-medium">Could not load more tasks</p>
+                    <p className="text-text-secondary text-xs">Loaded tasks are still available.</p>
+                  </div>
+                </div>
+                <Button size="sm" variant="outline" aria-label="Retry loading more tasks" onClick={() => void loadNextPage()} loading={isFetchingNextPage}>
+                  <RefreshCw size={14} aria-hidden />
+                  Retry
+                </Button>
+              </div>
+            )}
+            {!tasksQuery.isError && !nextPageError && !hasNextPage && allTasks.length > 0 && (
               <p className="text-text-muted py-4 text-center text-xs">
                 End of list
               </p>

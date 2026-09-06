@@ -53,15 +53,43 @@ def test_manager_policy_identity_connected_launch_completion_hook(
     executor = MagicMock()
 
     def run(**kwargs):
+        from runtime.orchestrator.active_authority_policy import (
+            SELF_EVALUATION_CONTRACT_DIGEST, SELF_EVALUATION_CONTRACT_ID,
+            SELF_EVALUATION_CONTRACT_VERSION, load_session_policy_binding,
+        )
         captured["prompt"] = kwargs["prompt"]
         kwargs["on_started"](4242)
+        binding = load_session_policy_binding(
+            db=org.db, task_id=task_id, session_id="sess-connected",
+            agent_name=manager,
+        )
+        captured["binding"] = binding
         response = client.post(
             f"/api/v1/orgs/alpha/tasks/{task_id}/completion",
             json={"session_id": "sess-connected", "agent": manager,
                   "status": "completed", "confidence": 90,
-                  "output_summary": "escalate",
-                  "decision": {"action": "escalate", "reason":
-                    "routine same-root follow-through of the already-completed slice"}},
+                      "output_summary": "escalate",
+                      "decision": {"action": "escalate", "reason":
+                        "routine same-root follow-through of the already-completed slice"},
+                      "manager_self_evaluation": {
+                        "contract_id": SELF_EVALUATION_CONTRACT_ID,
+                        "contract_version": SELF_EVALUATION_CONTRACT_VERSION,
+                        "contract_digest": SELF_EVALUATION_CONTRACT_DIGEST,
+                        "root_task_id": task_id,
+                        "manager_session_id": "sess-connected",
+                        "release_id": release.id,
+                        "policy_version": str(release.version),
+                        "policy_digest": release.policy_digest,
+                        "activation_id": activation.id,
+                        "activation_epoch": activation.epoch,
+                        "provider_id": binding["provider_id"],
+                        "executor_kind": binding["executor_kind"],
+                        "model_id": binding["model_id"],
+                        "disposition": "continue_same_root",
+                        "clause_id": "cont-routine-same-root",
+                        "action": "continue_same_root", "confidence": 1.0,
+                        "uncertainty_codes": [],
+                      }},
         )
         assert response.status_code == 200, response.text
         return ExecutorResult(success=True, duration_seconds=1, session_id="provider-session")
@@ -82,6 +110,7 @@ def test_manager_policy_identity_connected_launch_completion_hook(
     reason = "routine same-root follow-through of the already-completed slice"
     outcome = run_authority_hook(
         org.orchestrator, org.db.get_task(task_id), manager, reason, row["id"],
+        manager_self_evaluation=report.manager_self_evaluation,
     )
     diagnostics = [
         entry for entry in org.db.get_audit_logs(task_id)
@@ -99,7 +128,9 @@ def test_manager_policy_identity_connected_launch_completion_hook(
     assert (candidate.policy_id, candidate.policy_version, candidate.policy_digest) == (
         release.policy_id, str(release.version), release.policy_digest,
     )
-    assert (pin.provider_id, pin.executor_kind) == ("strict-fake", "test")
+    assert (pin.provider_id, pin.executor_kind) == (
+        captured["binding"]["provider_id"], captured["binding"]["executor_kind"],
+    )
     assert org.db.get_authority_evaluation(candidate.id) is not None
     envelope = org.db.get_active_authority_continue_envelope(task_id)
     assert envelope is not None

@@ -1,0 +1,12 @@
+# path<TAB>line<TAB>column<TAB>value<TAB>specific temporary reason
+App.tsx	2	27	#aabbcc	fixture JavaScript style object color
+App.tsx	4	26	#123456	fixture arbitrary Tailwind background
+App.tsx	4	41	#abc	fixture arbitrary Tailwind text color
+App.tsx	5	31	#112233	fixture arbitrary Tailwind gradient from color
+App.tsx	5	45	#223344	fixture arbitrary Tailwind gradient via color
+App.tsx	5	58	#334455	fixture arbitrary Tailwind gradient to color
+App.tsx	5	75	#445566	fixture arbitrary Tailwind divide color
+App.tsx	5	97	#556677	fixture arbitrary Tailwind placeholder color
+App.tsx	5	119	#667788	fixture arbitrary Tailwind ring-offset color
+App.tsx	8	18	#010203	fixture JSX color attribute
+theme.css	2	17	#c0ffee	fixture ordinary CSS color declaration

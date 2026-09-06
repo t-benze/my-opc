@@ -368,7 +368,7 @@ export function AgentDetailPane({ agentName, onClose, onStartThread }: AgentDeta
 
       {/* --- Editable fields — Pasture card sections --- */}
       <div className="flex-1 space-y-5 overflow-y-auto px-5 py-4">
-        {agent?.name === 'engineering_manager' && agent.team === 'engineering' && agent.role === 'manager' && (
+        {agent?.role === 'manager' && agent.team === 'engineering' && agent.name === 'engineering_manager' && (
           <TeamEscalationPolicyCard agent={{ name: agent.name, team: agent.team, role: agent.role }} />
         )}
         {/* Executor — live-derived dropdown (same source as AddAgentDialog) */}

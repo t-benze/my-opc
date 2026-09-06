@@ -253,7 +253,7 @@ layout:
     sm:     "0.1875rem"  # 3px — kbd chips, badges. Small. Editorial. NOT pill.
     md:     "0.3125rem"  # 5px — buttons, inputs, rows
     lg:     "0.5rem"     # 8px — cards, modals, panels
-    pill:   "999px"      # used only on tier dots and status indicators
+    pill:   "999px"      # used only on badges, chips, tabs, tier dots, and status indicators
 
   grid:
     app_shell:

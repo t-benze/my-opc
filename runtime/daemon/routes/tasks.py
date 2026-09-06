@@ -503,6 +503,10 @@ class CompletionBody(BaseModel):
     # Must be a dict matching the NextStep schema if present — validated
     # on the orchestrator side when the parser runs.
     decision: dict | None = None
+    # Manager-only S6a semantic evidence. Kept raw at the HTTP boundary so a
+    # malformed attempt can be reduced to a digest-only durable diagnostic;
+    # raw invalid content is never persisted.
+    manager_self_evaluation: object | None = None
     # Worker-reported outcome label for inline delegation chains. Free string;
     # per-team vocabulary (APPROVE, PASS, REQUEST_CHANGES, etc.) defined in
     # each team's workflow KB entry. Omit when the task is not part of a chain
@@ -633,9 +637,36 @@ async def submit_completion(task_id: str, body: CompletionBody, org: OrgDep) -> 
                 },
             )
     local_ci_json = _json.dumps(local_ci.model_dump()) if local_ci is not None else None
-    decision_json = (
-        _json.dumps(body.decision) if body.decision is not None else None
-    )
+    decision_payload = dict(body.decision) if body.decision is not None else None
+    if body.manager_self_evaluation is not None:
+        task = org.db.get_task(task_id)
+        if task is None or not org.teams.is_team_manager(body.agent):
+            raise HTTPException(status_code=400, detail={"code": "manager_self_evaluation_not_available"})
+        from runtime.orchestrator.active_authority_policy import load_session_policy_binding
+        binding = load_session_policy_binding(
+            db=org.db, task_id=task_id, session_id=body.session_id,
+            agent_name=body.agent,
+        )
+        if not binding or binding.get("mode") != "db_release":
+            raise HTTPException(status_code=400, detail={"code": "manager_self_evaluation_not_available"})
+        from runtime.models import ManagerSelfEvaluation
+        import hashlib as _hashlib
+        raw_canonical = _json.dumps(
+            body.manager_self_evaluation, sort_keys=True, default=str,
+        )
+        try:
+            sanitized = ManagerSelfEvaluation.model_validate(
+                body.manager_self_evaluation
+            ).model_dump(mode="json")
+        except ValidationError:
+            sanitized = {
+                "_error_code": "malformed_output",
+                "payload_digest": _hashlib.sha256(raw_canonical.encode()).hexdigest(),
+            }
+        if decision_payload is None:
+            decision_payload = {}
+        decision_payload["_manager_self_evaluation"] = sanitized
+    decision_json = _json.dumps(decision_payload) if decision_payload is not None else None
     async with org.db_lock:
         org.db.insert_task_result(
             task_id=task_id,

@@ -1534,10 +1534,19 @@ async def dispatch_from_thread_endpoint(
     inv = _validate_invocation_token(
         org, token=body.invocation_token,
         expected_agent=body.dispatcher, expected_thread_id=thread_id,
-        require_purposes=[ThreadInvocationPurpose.REPLY, ThreadInvocationPurpose.BOOTSTRAP],
+        require_purposes=[
+            ThreadInvocationPurpose.REPLY,
+            ThreadInvocationPurpose.BOOTSTRAP,
+            ThreadInvocationPurpose.TASK_FOLLOWUP,
+        ],
     )
     if inv.dispatched_task_id is not None:
-        raise HTTPException(status_code=409, detail={"code": "dispatch_already_used"})
+        code = (
+            "task_followup_dispatch_already_used"
+            if inv.purpose is ThreadInvocationPurpose.TASK_FOLLOWUP
+            else "dispatch_already_used"
+        )
+        raise HTTPException(status_code=409, detail={"code": code})
 
     if not org.db.is_thread_participant(thread_id, body.dispatcher):
         raise HTTPException(status_code=403, detail={"code": "not_participant"})
@@ -1570,6 +1579,11 @@ async def dispatch_from_thread_endpoint(
                         "dispatcher": dispatcher,
                         "requested_target": effective_target,
                         "hint": SELF_DISPATCH_HINT},
+            )
+        if inv.purpose is ThreadInvocationPurpose.TASK_FOLLOWUP and not is_manager:
+            raise HTTPException(
+                status_code=403,
+                detail={"code": "task_followup_dispatch_manager_required"},
             )
 
     org_paths = OrgPaths(root=org.root)
@@ -1611,52 +1625,82 @@ async def dispatch_from_thread_endpoint(
                         "predecessor_status": predecessor.status.value},
             )
 
-    async with org.db_lock:
-        cur_inv = org.db.get_pending_invocation(body.invocation_token)
-        if cur_inv is None or cur_inv.dispatched_task_id is not None:
-            raise HTTPException(status_code=409, detail={"code": "dispatch_already_used"})
-        task_id = org.db.next_task_id()
-        org.db.insert_task(TaskRecord(
-            id=task_id, brief=brief, team=effective_team,
-            assigned_agent=effective_target,
-            dispatched_from_thread_id=thread_id,
-        ))
-        sys_seq = org.db.append_thread_message(
-            thread_id=thread_id, speaker=dispatcher,
-            kind=ThreadMessageKind.SYSTEM,
-            system_payload={
-                "kind_tag": "task_dispatched",
-                "task_id": task_id,
-                "dispatcher": dispatcher,
-                "target_agent": effective_target,
-                "team": effective_team,
-                "brief_preview": brief[:160],
-            },
-        )
-        org.db.record_dispatch_on_invocation(body.invocation_token, task_id=task_id)
-        audit = AuditLogger(org.db)
-        audit.log_thread_dispatch(
-            thread_id, task_id=task_id, dispatcher=dispatcher,
-            target_agent=effective_target, team=effective_team,
-        )
-        # Canonical supersede tail shared with resolve_escalation_in_process
-        # (THR-080 #4).  Closes predecessor + revisit family, wakes parents,
-        # and emits thread followups.
-        family_closed: list[str] = []
-        if resolves and predecessor is not None:
-            from runtime.daemon.routes.tasks import (
-                _close_predecessor_family_and_run_tail,
+    if inv.purpose is ThreadInvocationPurpose.TASK_FOLLOWUP:
+        if resolves:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "task_followup_dispatch_resolves_forbidden"},
             )
-            family_closed = _close_predecessor_family_and_run_tail(
-                org, audit,
-                predecessor=predecessor,
-                successor_root=task_id,
-                pred_block_kind=pred_block_kind,
-                actor="thread-dispatch",
-                note_suffix=f"thread {thread_id} dispatch by {dispatcher}",
-                thread_id=thread_id,
-                close_revisit_family=True,
+        async with org.teams_lock:
+            if not org.teams.is_team_manager(dispatcher):
+                raise HTTPException(
+                    status_code=403,
+                    detail={"code": "task_followup_dispatch_manager_required"},
+                )
+            async with org.db_lock:
+                task_id = org.db.next_task_id()
+                result = org.db.dispatch_task_followup_replacement(
+                    token=body.invocation_token,
+                    thread_id=thread_id,
+                    dispatcher=dispatcher,
+                    task=TaskRecord(
+                        id=task_id, brief=brief, team=effective_team,
+                        assigned_agent=effective_target,
+                        dispatched_from_thread_id=thread_id,
+                    ),
+                    team=effective_team,
+                )
+        if not result["ok"]:
+            raise HTTPException(status_code=409, detail={"code": result["code"]})
+        sys_seq = result["system_message_seq"]
+        family_closed = []
+    else:
+        async with org.db_lock:
+            cur_inv = org.db.get_pending_invocation(body.invocation_token)
+            if cur_inv is None or cur_inv.dispatched_task_id is not None:
+                raise HTTPException(status_code=409, detail={"code": "dispatch_already_used"})
+            task_id = org.db.next_task_id()
+            org.db.insert_task(TaskRecord(
+                id=task_id, brief=brief, team=effective_team,
+                assigned_agent=effective_target,
+                dispatched_from_thread_id=thread_id,
+            ))
+            sys_seq = org.db.append_thread_message(
+                thread_id=thread_id, speaker=dispatcher,
+                kind=ThreadMessageKind.SYSTEM,
+                system_payload={
+                    "kind_tag": "task_dispatched",
+                    "task_id": task_id,
+                    "dispatcher": dispatcher,
+                    "target_agent": effective_target,
+                    "team": effective_team,
+                    "brief_preview": brief[:160],
+                },
             )
+            org.db.record_dispatch_on_invocation(body.invocation_token, task_id=task_id)
+            audit = AuditLogger(org.db)
+            audit.log_thread_dispatch(
+                thread_id, task_id=task_id, dispatcher=dispatcher,
+                target_agent=effective_target, team=effective_team,
+            )
+            # Canonical supersede tail shared with resolve_escalation_in_process
+            # (THR-080 #4).  Closes predecessor + revisit family, wakes parents,
+            # and emits thread followups.
+            family_closed: list[str] = []
+            if resolves and predecessor is not None:
+                from runtime.daemon.routes.tasks import (
+                    _close_predecessor_family_and_run_tail,
+                )
+                family_closed = _close_predecessor_family_and_run_tail(
+                    org, audit,
+                    predecessor=predecessor,
+                    successor_root=task_id,
+                    pred_block_kind=pred_block_kind,
+                    actor="thread-dispatch",
+                    note_suffix=f"thread {thread_id} dispatch by {dispatcher}",
+                    thread_id=thread_id,
+                    close_revisit_family=True,
+                )
 
     enqueue_task(state, slug, task_id)
 

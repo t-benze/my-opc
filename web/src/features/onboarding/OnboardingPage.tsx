@@ -134,7 +134,7 @@ function WelcomeStep({
   const firstRun = existingCount === 0;
   return (
     <section className="pt-6 sm:pt-10">
-      <RanchLogo className="text-accent h-14 w-14" />
+      <RanchLogo className="text-brand-foreground h-14 w-14" />
       <p className="text-accent-text mt-5 text-xs font-semibold tracking-wider uppercase">
         {firstRun ? 'Fresh start' : 'New workspace'}
       </p>

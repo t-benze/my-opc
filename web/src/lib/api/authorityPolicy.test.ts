@@ -13,10 +13,6 @@ const empty = {
   target_manager: 'engineering_manager',
   can_mutate: true,
   bootstrap_required: true,
-  activation_guard: {
-    ready: false,
-    reason: 'TASK-6335 production verification required',
-  },
   bootstrap_template: {
     title: 'Policy', normative_text: 'Text', clauses: [],
     continuation_phrase: 'server-authored phrase',

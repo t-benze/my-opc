@@ -59,6 +59,62 @@ from runtime.orchestrator.teams import TeamsRegistry
 logger = logging.getLogger(__name__)
 
 
+def completion_report_from_result_row(
+    task_id: str, row: dict, *, fallback_agent: str = "unknown",
+) -> CompletionReport:
+    """Reconstruct the authenticated completion carrier from one result row.
+
+    All normal and recovery consumers must remove the reserved self-evaluation
+    carrier before strict ``NextStep`` parsing, while preserving it unchanged
+    for the authority hook's server-bound validation.
+    """
+    decision: NextStep | None = None
+    manager_self_evaluation = None
+    raw_decision = row.get("decision_json")
+    if raw_decision:
+        try:
+            parsed = json.loads(raw_decision)
+            if isinstance(parsed, dict):
+                manager_self_evaluation = parsed.pop(
+                    "_manager_self_evaluation", None
+                )
+                decision = NextStep(**parsed)
+        except (json.JSONDecodeError, TypeError, ValueError, ValidationError):
+            decision = None
+
+    local_ci: LocalCiEvidence | None = None
+    raw_local_ci = row.get("local_ci")
+    if raw_local_ci:
+        try:
+            parsed_local_ci = json.loads(raw_local_ci)
+            if isinstance(parsed_local_ci, dict):
+                local_ci = LocalCiEvidence(**parsed_local_ci)
+        except (json.JSONDecodeError, TypeError, ValueError, ValidationError):
+            pass
+
+    risks = row.get("risks_flagged") or []
+    if isinstance(risks, str):
+        try:
+            risks = json.loads(risks)
+        except (json.JSONDecodeError, TypeError):
+            risks = []
+
+    return CompletionReport(
+        task_id=task_id,
+        agent=row.get("agent") or fallback_agent,
+        status=row.get("status") or "completed",
+        confidence=row.get("confidence_score") or 0,
+        output_summary=row.get("output_summary") or "",
+        verdict=row.get("verdict"),
+        decision=decision,
+        manager_self_evaluation=manager_self_evaluation,
+        risks_flagged=risks,
+        output_dir=row.get("output_dir"),
+        waiting_on_job_ids=row.get("waiting_on_job_ids") or [],
+        local_ci=local_ci,
+    )
+
+
 class WorkspaceNotInitialized(RuntimeError):
     """Raised when an agent workspace is missing required skill files.
 
@@ -590,53 +646,11 @@ class Orchestrator:
     def _read_completion_from_db(
         self, task_id: str, agent: str, session_id: str,
     ) -> CompletionReport | None:
-        def _parse_local_ci(raw: str | None) -> LocalCiEvidence | None:
-            """Parse a stored local_ci JSON string back into a LocalCiEvidence.
-
-            Returns None on absent, empty, or unparseable rows so legacy (NULL)
-            completions and corrupt data never explode — they degrade to None
-            without mutation.
-            """
-            if not raw:
-                return None
-            try:
-                parsed = json.loads(raw)
-                if isinstance(parsed, dict):
-                    return LocalCiEvidence(**parsed)
-            except (json.JSONDecodeError, TypeError, ValueError, ValidationError):
-                pass
-            return None
-
         row = self._db.get_latest_task_result(task_id, agent, session_id)
         if row is None:
             return None
-        decision: NextStep | None = None
-        raw_decision = row.get("decision_json")
-        if raw_decision:
-            # A row with garbage in decision_json is a corruption signal, not
-            # a reason to fall through to the legacy prose-JSON path — leave
-            # decision None so _parse_next_step escalates with a readable
-            # reason instead of silently approving the prose summary.
-            try:
-                parsed = json.loads(raw_decision)
-                if isinstance(parsed, dict):
-                    decision = NextStep(**parsed)
-            except (json.JSONDecodeError, TypeError, ValueError, ValidationError):
-                decision = None
-        return CompletionReport(
-            task_id=task_id,
-            agent=agent,
-            status=row.get("status") or "completed",
-            confidence=row["confidence_score"] or 0,
-            output_summary=row["output_summary"] or "",
-            verdict=row.get("verdict"),
-            decision=decision,
-            risks_flagged=row.get("risks_flagged") or [],
-            dependencies=[],
-            suggested_reviewer_focus=[],
-            output_dir=row.get("output_dir"),
-            waiting_on_job_ids=row.get("waiting_on_job_ids") or [],
-            local_ci=_parse_local_ci(row.get("local_ci")),
+        return completion_report_from_result_row(
+            task_id, row, fallback_agent=agent,
         )
 
     def create_task(self, brief: str, team: str = "engineering") -> str:
@@ -929,12 +943,17 @@ class Orchestrator:
         active_policy_section = (
             render_active_team_policy(
                 release=policy_snapshot.release, activation=policy_snapshot.activation,
+                provider_id=provider, executor_kind=provider,
+                model_id=model_name or "default",
+                root_task_id=task_id, manager_session_id=session_id,
             ) if policy_snapshot is not None else ""
         )
         if self._teams.is_team_manager(agent_name):
             persist_session_policy_binding(
                 db=self._db, task_id=task_id, session_id=session_id,
                 agent_name=agent_name, snapshot=policy_snapshot,
+                provider_id=provider, executor_kind=provider,
+                model_id=model_name or "default",
             )
         full_prompt = self._build_agent_prompt(
             provider,

@@ -325,6 +325,7 @@ class CompletionReport(BaseModel):
     # double-encoding trap where the manager's output_summary had to itself
     # be JSON (see TASK-071 post-mortem).
     decision: NextStep | None = None
+    manager_self_evaluation: dict | None = None
     risks_flagged: list[str] = Field(default_factory=list)
     dependencies: list[str] = Field(default_factory=list)
     suggested_reviewer_focus: list[str] = Field(default_factory=list)
@@ -333,6 +334,38 @@ class CompletionReport(BaseModel):
     # Push-PR local CI evidence. Optional for non-PR completions;
     # contractually required for any pushed-PR report.
     local_ci: LocalCiEvidence | None = None
+
+
+class ManagerSelfEvaluation(BaseModel):
+    """Strict manager-only S6a result. No prose-bearing field is permitted."""
+    model_config = {"extra": "forbid", "strict": True}
+
+    contract_id: StrictStr
+    contract_version: StrictStr
+    contract_digest: StrictStr
+    root_task_id: StrictStr
+    manager_session_id: StrictStr
+    release_id: StrictStr
+    policy_version: StrictStr
+    policy_digest: StrictStr
+    activation_id: StrictStr
+    activation_epoch: StrictInt
+    provider_id: StrictStr
+    executor_kind: StrictStr
+    model_id: StrictStr
+    disposition: Literal["escalate", "continue_same_root"]
+    clause_id: StrictStr
+    action: Literal["escalate_to_founder", "continue_same_root"]
+    confidence: float = Field(strict=True, ge=0.0, le=1.0)
+    uncertainty_codes: list[Literal[
+        "low_confidence", "ambiguous", "missing_evidence",
+        "conflicting_evidence", "novel",
+    ]] = Field(default_factory=list)
+
+    @field_validator("contract_digest", "policy_digest")
+    @classmethod
+    def _self_evaluation_digests(cls, value: str, info):
+        return validate_authority_digest(value, f"self_evaluation.{info.field_name}")
 
 
 class TaskStep(BaseModel):

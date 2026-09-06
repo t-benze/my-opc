@@ -7,3 +7,7 @@ export const useCreateTeamEscalationPolicyRelease = () =>
   useData().authorityPolicy.useCreateTeamEscalationPolicyRelease();
 export const useActivateTeamEscalationPolicyRelease = () =>
   useData().authorityPolicy.useActivateTeamEscalationPolicyRelease();
+export const useTeamEscalationPolicyHistory = (agent: { name: string; team: string; role: string }) =>
+  useData().authorityPolicy.useTeamEscalationPolicyHistory(agent);
+export const useTeamEscalationPolicyOutcomes = (agent: { name: string; team: string; role: string }) =>
+  useData().authorityPolicy.useTeamEscalationPolicyOutcomes(agent);

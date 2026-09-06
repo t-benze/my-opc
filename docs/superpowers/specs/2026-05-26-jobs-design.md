@@ -65,7 +65,36 @@ stages, and refuses conflicting shapes or duplicate live workspaces without
 repairing or choosing data. Legacy job values and local HTTP/CLI behavior are
 unchanged and no remote runner, attempt, or linkage is backfilled.
 
-Runner authentication/enrollment, actual transport, leases/fences/journals,
+## 2026-09-05 TASK-6611 additive identity/enrollment persistence correction
+
+The shipped persistence-only correction adds `cert_expires_at TEXT NOT NULL`
+immediately after `cert_spki_sha256`, plus the exact
+`remote_runner_enrollment_challenges` table and its partial `(org_slug,
+expires_at)` index for unconsumed, unrevoked rows. The distinct six-stage
+`generic_remote_runner_identity_enrollment_v1` marker runs first at every
+managed database open. Until it completes, exactly two `remote_runners` shapes
+are accepted: untouched merged S2 only when the entire six-table runner graph
+(and any stage-allowed identity table) is empty, or the amended canonical
+shape regardless of rows. Once complete, only the amended parent and exact
+challenge objects are valid. Every other partial, nullable, reordered,
+constraint/index/FK-drifted, marker-mismatched, or temporary-parent state is
+refused before mutation. Empty-S2 replacement and each marker advance are
+atomic; deterministic inert test hooks immediately before parent replacement
+and after rename execute inside the same rebuild transaction, and no certificate
+expiry is guessed or backfilled. The compatibility fixtures execute authentic
+`script_requests` stores from initial DDL commit `da539c3a…` and exact pre-jobs
+parent `4b73416a…`, plus the archived merged-S2 commit, instead of synthesizing
+or relabeling current jobs. Canonical/FK validation immediately before
+`complete` and the marker write share one `BEGIN IMMEDIATE` transaction;
+post-commit validation is defense in depth. Full schema/all-row snapshots, two
+further reopens, systematic mutations spanning the marker, all inherited and
+new tables/indexes/columns/CHECKs/UNIQUEs/FKs/orders/predicates and marker/object
+constellations, and executable two-way requirement-to-validator/test
+traceability preserve existing jobs linkage, `audit_log.task_id`,
+`tasks.blocked_on_job_ids`, and every unrelated object/value.
+
+Challenge creation/consumption/replay and runner authentication/enrollment,
+renewal/rotation/revocation services or routes, actual transport, leases/fences/journals,
 observation execution, subprocess phase
 engine/finalization, coordinator and terminal-before-resume integration,
 CLI/API/UI, deployment, and activation are explicitly unimplemented. No S1

@@ -5,8 +5,8 @@ into the orchestrator's manager-root escalation commit point. It defines:
 
 * the immutable per-attempt input snapshot;
 * the closed output schema the evaluator must produce;
-* the deterministic injectable evaluator seam (``AuthorityEvaluator``) with a
-  strict fake for CI and a bounded subprocess production evaluator;
+* the authenticated manager-completion self-evaluation parser, plus the
+  deterministic injectable evaluator seam retained for strict tests;
 * ``run_authority_hook`` — the single hook the orchestrator calls before a
   manager root's proposed escalation is committed. It returns
   ``"continue_same_root"`` (the named same-root permitted action was executed)
@@ -95,6 +95,7 @@ from runtime.models import (
     AuthorityDispositionCode,
     AuthorityFenceResult,
     TaskStatus,
+    ManagerSelfEvaluation,
     validate_authority_digest,
     validate_authority_version,
 )
@@ -735,7 +736,12 @@ class StrictFakeAuthorityEvaluator:
 # ── Production subprocess evaluator ──────────────────────────────────────
 
 class LLMSubprocessAuthorityEvaluator:
-    """Production evaluator: ONE bounded one-shot LLM call through the
+    """Legacy non-production evaluator retained as a strict compatibility seam.
+
+    S6a production wiring never constructs this class. Semantic evidence is
+    supplied by the already-running manager in its authenticated completion.
+    This bounded implementation remains for adversarial parser tests and old
+    explicitly injected callers only. It performs one one-shot LLM call through the
     machine-local executor registry (shared-identity posture), followed by
     strict closed-schema output parsing.
 
@@ -1410,6 +1416,7 @@ def run_authority_hook(
     agent: str,
     reason: str,
     result_row_id: int | None,
+    manager_self_evaluation: dict | None = None,
 ) -> str:
     """The pre-escalation authority hook. Returns ``"continue_same_root"``
     (the named same-root permitted action was executed and audited) or
@@ -1434,7 +1441,9 @@ def run_authority_hook(
     active_release = None
     try:
         from runtime.orchestrator.active_authority_policy import (
-            load_session_policy_snapshot, policy_from_release,
+            load_session_policy_binding, load_session_policy_snapshot, policy_from_release,
+            SELF_EVALUATION_CONTRACT_DIGEST, SELF_EVALUATION_CONTRACT_ID,
+            SELF_EVALUATION_CONTRACT_VERSION,
         )
         from runtime.orchestrator.authority_policy_store import AuthorityPolicyStore
         policy_store = AuthorityPolicyStore(db)
@@ -1446,6 +1455,10 @@ def run_authority_hook(
             active_activation = launch_snapshot.activation
             active_release = launch_snapshot.release
             policy = policy_from_release(active_release)
+        session_binding = load_session_policy_binding(
+            db=db, task_id=task.id, session_id=task.current_session_id or "",
+            agent_name=agent,
+        )
     except Exception as exc:
         _record_hook_outcome(
             db, task_id=task.id, agent=agent, outcome=OUTCOME_CAPTURE_FAILURE,
@@ -1488,11 +1501,21 @@ def run_authority_hook(
     causal_event_digest = _sha256(f"task-result:{result_row_id}")
     evaluator = orch._authority_evaluator
     manager_session_id = current.current_session_id or ""
-    model_id = evaluator.model_id if evaluator is not None else "none"
-    model_version = evaluator.model_version if evaluator is not None else "v1"
-    model_digest = (
-        evaluator.model_digest if evaluator is not None else _sha256("none:v1")
-    )
+    if active_activation is not None:
+        provider_id = str((session_binding or {}).get("provider_id", "unknown"))
+        executor_kind = str((session_binding or {}).get("executor_kind", "unknown"))
+        effective_model_id = str((session_binding or {}).get("model_id", "default"))
+        model_id = f"manager/{provider_id}/{executor_kind}/{effective_model_id}"
+        model_version = SELF_EVALUATION_CONTRACT_VERSION
+        model_digest = _sha256(
+            f"{model_id}:{model_version}:{SELF_EVALUATION_CONTRACT_DIGEST}"
+        )
+    else:
+        provider_id = getattr(evaluator, "provider_id", "local") if evaluator else "none"
+        executor_kind = getattr(evaluator, "_executor_kind", "none") if evaluator else "none"
+        model_id = evaluator.model_id if evaluator is not None else "none"
+        model_version = evaluator.model_version if evaluator is not None else "v1"
+        model_digest = evaluator.model_digest if evaluator is not None else _sha256("none:v1")
     structured_facts, server_clauses = _server_evidence(
         orch, current, agent, policy, fences,
     )
@@ -1551,14 +1574,12 @@ def run_authority_hook(
             fence_results={name: fr.model_dump(mode="json") for name, fr in fences.items()},
         )
         if active_activation is not None and active_release is not None:
-            evaluator_provider = getattr(evaluator, "provider_id", "local") if evaluator else "none"
-            evaluator_kind = getattr(evaluator, "_executor_kind", "none") if evaluator else "none"
             candidate, _pin = policy_store.claim_candidate_with_pin(
                 release_id=active_release.id,
                 activation_id=active_activation.id,
                 activation_epoch=active_activation.epoch,
-                provider_id=evaluator_provider,
-                executor_kind=evaluator_kind,
+                provider_id=provider_id,
+                executor_kind=executor_kind,
                 **candidate_kwargs,
             )
             candidate_id, won = candidate.id, True
@@ -1578,8 +1599,8 @@ def run_authority_hook(
         pin = policy_store.get_candidate_pin(candidate_id)
         if pin is None:
             raise ValueError("DB-backed authority candidate is missing its policy pin")
-        expected_provider = getattr(evaluator, "provider_id", "local") if evaluator else "none"
-        expected_kind = getattr(evaluator, "_executor_kind", "none") if evaluator else "none"
+        expected_provider = provider_id
+        expected_kind = executor_kind
         if (pin.release_id != active_release.id
                 or pin.activation_id != active_activation.id
                 or pin.activation_epoch != active_activation.epoch
@@ -1643,7 +1664,58 @@ def run_authority_hook(
         return "escalate"
 
     # ---- 6. Evaluate (bounded by the seam; evaluator failures are typed) ----
-    if evaluator is None:
+    if active_activation is not None:
+        try:
+            if manager_self_evaluation is None:
+                raise ValueError("manager self-evaluation is missing")
+            if manager_self_evaluation.get("_error_code"):
+                raise ValueError("manager self-evaluation is malformed")
+            supplied = ManagerSelfEvaluation.model_validate(manager_self_evaluation)
+            expected_identity = {
+                "contract_id": SELF_EVALUATION_CONTRACT_ID,
+                "contract_version": SELF_EVALUATION_CONTRACT_VERSION,
+                "contract_digest": SELF_EVALUATION_CONTRACT_DIGEST,
+                "root_task_id": current.id,
+                "manager_session_id": manager_session_id,
+                "release_id": active_release.id,
+                "policy_version": str(active_release.version),
+                "policy_digest": active_release.policy_digest,
+                "activation_id": active_activation.id,
+                "activation_epoch": active_activation.epoch,
+                "provider_id": provider_id,
+                "executor_kind": executor_kind,
+                "model_id": effective_model_id,
+            }
+            actual = supplied.model_dump(mode="json")
+            mismatched = [key for key, value in expected_identity.items()
+                          if actual.get(key) != value]
+            if mismatched:
+                raise ValueError(
+                    "manager self-evaluation binding mismatch: "
+                    + ", ".join(sorted(mismatched))
+                )
+            disposition = AuthorityDisposition(supplied.disposition)
+            result = AuthorityEvaluationResult(
+                disposition=disposition,
+                disposition_code=(
+                    AuthorityDispositionCode.CONTINUE_SAME_ROOT
+                    if disposition == AuthorityDisposition.CONTINUE_SAME_ROOT
+                    else AuthorityDispositionCode.ESCALATE
+                ),
+                response_digest=_sha256(json.dumps(actual, sort_keys=True)),
+                clause_id=supplied.clause_id,
+                action=supplied.action,
+                confidence=supplied.confidence,
+                uncertainty_codes=tuple(supplied.uncertainty_codes),
+            )
+        except Exception as exc:
+            result = AuthorityEvaluationResult(
+                disposition=AuthorityDisposition.EVALUATOR_ERROR,
+                disposition_code=AuthorityDispositionCode.MALFORMED_OUTPUT,
+                response_digest=_sha256(f"manager-self-evaluation-error:{exc}"),
+                error=str(exc),
+            )
+    elif evaluator is None:
         result = AuthorityEvaluationResult(
             disposition=AuthorityDisposition.EVALUATOR_ERROR,
             disposition_code=AuthorityDispositionCode.EVALUATOR_ERROR,

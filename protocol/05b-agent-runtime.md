@@ -466,6 +466,15 @@ convention and send it in the manifest body.
 The signed architecture is at
 ``docs/superpowers/specs/2026-07-24-unified-adapter-runtime-architecture.md``.
 
+**THR-181 S6b/S7 manager runtime visibility.** A newly launched eligible
+Engineering Manager remains the semantic evaluator for its own proposed
+decision; no separate production evaluator process is launched. The manager
+Agent page may read only bounded secret-free immutable history and durable
+outcome receipts, with missing causal linkage explicitly marked
+`receipt_incomplete`. Workers and other managers receive no API or DOM surface.
+Code landing/redeploy and explicit founder-authorized production activation are
+separate events; activation retains the ordinary daemon mechanical fences.
+
 Each agent's configuration specifies context and workspace:
 
 ```
@@ -1697,7 +1706,8 @@ like the other phase frames. S1 does not produce or persist that context.
 
 S2 installs the approved additive SQLite persistence contract at every managed
 `Database()` open. It contains `remote_runners` (including the sole active
-certificate serial and SPKI fingerprint), `remote_runner_workspaces`,
+certificate serial, SPKI fingerprint, and non-null certificate expiry),
+`remote_runner_workspaces`,
 `remote_job_attempts`, `remote_phase_receipts`,
 `remote_pre_run_observations`, and `remote_protocol_frames`; there is no
 runner-key history table. Exact partial indexes and composite workspace
@@ -1708,7 +1718,31 @@ tables, columns, keys, predicates, or index order fail closed. Five nullable
 `jobs` linkage columns are additive; legacy rows receive no backfill and retain
 their exact status, reason, blocked-job, and audit-scope semantics.
 
-There is deliberately no shipping producer or consumer yet. Later slices must
+The TASK-6611 additive persistence correction also installs exactly one
+`remote_runner_enrollment_challenges` table and its unconsumed/unrevoked expiry
+index. Its six-stage `generic_remote_runner_identity_enrollment_v1` marker is
+the first schema/data operation at `Database()` open. Before completion the
+guard accepts only (a) the exact merged-S2 `remote_runners` parent, and only
+with every runner-graph/identity table empty, or (b) the exact amended parent;
+after completion only the amended parent plus exact challenge table/index is
+accepted. The empty-S2 parent replacement is atomic, exposes inert test-only
+interruption hooks immediately before the drop and after the rename inside
+that transaction, never invents certificate expiry, validates foreign-key
+targets/checks, and leaves no temporary parent. Immediately before publishing
+`complete`, canonical-shape validation and `PRAGMA foreign_key_check` run in
+the same `BEGIN IMMEDIATE` transaction as the marker write; the post-commit
+open check is defense in depth. Historical fixtures execute the authentic
+initial-script-request commit `da539c3a…`, exact pre-jobs parent `4b73416a…`,
+and immutable merged-S2 commit `1be72fe…`, rather than relabeling current rows.
+Full-schema/all-row snapshots, two further reopens, systematic mutation of the
+marker, all runner-graph tables, every inherited/new index and their columns,
+constraints, FKs and predicates, marker/object constellations, and executable
+bidirectional TASK-6611 requirement/assertion traceability preserve unrelated
+values and the existing jobs/audit overloads.
+
+There is deliberately still no shipping producer or consumer yet. The new
+table, index, expiry field, and marker have no challenge lifecycle service or
+S3 API/auth surface. Later slices must
 prove producer completeness and implement runner authentication/enrollment,
 transport, observation,
 phase execution/finalization, coordination/terminal-before-resume, CLI/API/UI,

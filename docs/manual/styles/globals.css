@@ -261,7 +261,7 @@ footer.nextra-nav-container,
   color: var(--hr-green-deep);
 }
 
-/* Primary CTA — echoes the mockup's .btn-primary green pill. */
+/* Primary CTA — echoes the mockup's green primary action. */
 a.hr-cta {
   display: inline-flex;
   align-items: center;

@@ -630,6 +630,7 @@ def _consume_completion_report(
         from runtime.orchestrator.authority import run_authority_hook
         hook_outcome = run_authority_hook(
             orch, task, agent, reason, result_row_id,
+            manager_self_evaluation=report.manager_self_evaluation,
         )
         if hook_outcome == "continue_same_root":
             # Same-root continuation already executed (audited): the root

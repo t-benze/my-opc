@@ -28,8 +28,9 @@
  * The finer Direction-A states (waiting-on-you / review / merged / live / idle)
  * are intentionally absent — no field on the thread-list payload backs them.
  *
- * Direction-A Pasture card styling: bg-surface border-border-default rounded-lg
- * shadow-pasture-sm (ds.css .card). Active row uses accent-muted + left marker.
+ * Founder-approved interactive-row mapping: bg-surface border-border-default
+ * rounded-sm (8px) with shadow-pasture-sm. Active row uses accent-muted + left
+ * marker; nested status/dream pills and indicators retain their own radii.
  */
 import type { ReactNode } from 'react';
 import { AgentChip } from './AgentChip';
@@ -94,7 +95,7 @@ export function InboxRow({
     onSelect();
   };
 
-  const shellCls = `group relative block w-full rounded-lg border px-3 py-2 text-left no-underline transition-colors ${
+  const shellCls = `group relative block w-full rounded-sm border px-3 py-2 text-left no-underline transition-colors ${
     active
       ? 'bg-accent-muted border-accent-muted shadow-pasture-sm'
       : 'bg-surface border-border-default shadow-pasture-sm hover:border-border-strong'

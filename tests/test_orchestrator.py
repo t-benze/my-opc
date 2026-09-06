@@ -11,6 +11,7 @@ from runtime.infrastructure.database import Database
 from runtime.models import (
     TaskRecord,
     TaskStatus,
+    ThreadRecord,
 )
 from runtime.orchestrator.executors import ExecutorResult
 from runtime.orchestrator.orchestrator import Orchestrator, AgentUnavailableError
@@ -377,6 +378,104 @@ def test_run_agent_shipping_seam_injects_manager_policy_binds_session_and_omits_
     with patch.object(orchestrator, "_build_executor", return_value=mock_executor):
         orchestrator._run_agent(worker_task, "dev_agent", "")
     assert RESERVED_TEAM_POLICY_HEADER not in mock_executor.run.call_args.kwargs["prompt"]
+
+
+def test_manager_policy_shipping_seam_consumes_authenticated_self_evaluation(
+    orchestrator, test_runtime, monkeypatch,
+):
+    """S6a connected proof: real launch binding -> result row -> authority hook."""
+    from runtime.orchestrator.active_authority_policy import (
+        SELF_EVALUATION_CONTRACT_DIGEST, SELF_EVALUATION_CONTRACT_ID,
+        SELF_EVALUATION_CONTRACT_VERSION, load_session_policy_binding,
+    )
+    from runtime.orchestrator.authority import run_authority_hook
+    from runtime.orchestrator.authority_policy import CONTINUE_ROUTINE_PHRASE
+    from runtime.orchestrator.authority_policy_store import AuthorityPolicyStore
+    from runtime.orchestrator.teams import TeamManager
+    from tests.authority_policy_test_factory import activate_test_policy
+    from tests.conftest import seed_test_agents
+
+    seed_test_agents(test_runtime, ("engineering_manager", "dev_agent"))
+    _setup_workspaces(test_runtime, ["engineering_manager", "dev_agent"])
+    orchestrator._teams._teams["engineering"] = TeamManager(
+        name="engineering_manager", team="engineering", workers=("dev_agent",),
+    )
+    release, activation = activate_test_policy(orchestrator._db)
+    mock_executor = MagicMock()
+    mock_executor.run.return_value = ExecutorResult(
+        success=True, duration_seconds=1, session_id="provider-session",
+    )
+    task_id = orchestrator.create_task("manager work")
+    orchestrator._db.insert_thread(ThreadRecord(id="THR-s6a", subject="S6a proof"))
+    orchestrator._db.update_task(
+        task_id, assigned_agent="engineering_manager",
+    )
+    orchestrator._db.execute(
+        "UPDATE tasks SET dispatched_from_thread_id=? WHERE id=?", ("THR-s6a", task_id),
+    )
+    monkeypatch.setattr(orchestrator, "_build_session_id", lambda: "sess-s6a")
+    with patch.object(orchestrator, "_build_executor", return_value=mock_executor):
+        orchestrator._run_agent(task_id, "engineering_manager", "decide")
+    binding = load_session_policy_binding(
+        db=orchestrator._db, task_id=task_id, session_id="sess-s6a",
+        agent_name="engineering_manager",
+    )
+    assert binding is not None
+    orchestrator._db.update_task(
+        task_id, status=TaskStatus.IN_PROGRESS, block_kind=None,
+        orchestration_step_count=1, current_session_id="sess-s6a",
+    )
+    decision = {"action": "escalate", "reason": CONTINUE_ROUTINE_PHRASE}
+    self_eval = {
+        "contract_id": SELF_EVALUATION_CONTRACT_ID,
+        "contract_version": SELF_EVALUATION_CONTRACT_VERSION,
+        "contract_digest": SELF_EVALUATION_CONTRACT_DIGEST,
+        "root_task_id": task_id, "manager_session_id": "sess-s6a",
+        "release_id": release.id, "policy_version": str(release.version),
+        "policy_digest": release.policy_digest,
+        "activation_id": activation.id, "activation_epoch": activation.epoch,
+        "provider_id": binding["provider_id"],
+        "executor_kind": binding["executor_kind"],
+        "model_id": binding["model_id"],
+        "disposition": "continue_same_root",
+        "clause_id": "cont-routine-same-root", "action": "continue_same_root",
+        "confidence": 1.0, "uncertainty_codes": [],
+    }
+    orchestrator._db.insert_task_result(
+        task_id=task_id, agent="engineering_manager", session_id="sess-s6a",
+        output_summary="complete", confidence_score=100,
+        decision_json=json.dumps({**decision, "_manager_self_evaluation": self_eval}),
+    )
+    result_row = orchestrator._db.get_latest_task_result(
+        task_id, "engineering_manager", "sess-s6a"
+    )
+    assert run_authority_hook(
+        orchestrator, orchestrator._db.get_task(task_id), "engineering_manager",
+        CONTINUE_ROUTINE_PHRASE, result_row["id"],
+        manager_self_evaluation=self_eval,
+    ) == "continue_same_root"
+    assert orchestrator._db.get_task(task_id).status == TaskStatus.PENDING
+    evaluations = orchestrator._db.execute(
+        "SELECT disposition FROM authority_evaluations"
+    ).fetchall()
+    assert [row["disposition"] for row in evaluations] == ["continue_same_root"]
+    produced = orchestrator._db.execute("SELECT * FROM authority_candidates").fetchone()
+    assert produced["root_task_id"] == task_id
+    assert produced["manager_session_id"] == "sess-s6a"
+    assert produced["causal_event_id"] == f"result:{result_row['id']}"
+    from runtime.daemon.routes.authority_policy import _outcome_receipts_complete
+    projected = AuthorityPolicyStore(orchestrator._db).list_outcomes(
+        "engineering", cursor=None, limit=10,
+    )[0]
+    assert len(projected) == 1
+    complete, _ = _outcome_receipts_complete(
+        type("Org", (), {"db": orchestrator._db})(), projected[0]
+    )
+    assert complete, {
+        "projected": projected[0],
+        "task": dict(orchestrator._db.get_task(task_id).__dict__),
+        "audit": orchestrator._db.get_audit_logs(task_id),
+    }
 
 
 @pytest.mark.parametrize("marker", [

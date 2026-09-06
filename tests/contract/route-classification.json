@@ -77,6 +77,8 @@
     "GET /api/v1/orgs/{slug}/dashboard/summary",
     "GET /api/v1/orgs/{slug}/agents",
     "GET /api/v1/orgs/{slug}/agents/{agent_name}/team-escalation-policy",
+    "GET /api/v1/orgs/{slug}/agents/{agent_name}/team-escalation-policy/history",
+    "GET /api/v1/orgs/{slug}/agents/{agent_name}/team-escalation-policy/outcomes",
     "POST /api/v1/orgs/{slug}/agents/{agent_name}/team-escalation-policy/releases",
     "POST /api/v1/orgs/{slug}/agents/{agent_name}/team-escalation-policy/activations",
     "POST /api/v1/orgs/{slug}/agents",

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import asyncio
+import json
 from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
+from httpx import ASGITransport, AsyncClient
 
 from runtime.infrastructure.artifact_store import ArtifactStore
 from runtime.models import (
@@ -2119,28 +2122,418 @@ def test_reply_admits_task_followup_purpose(tmp_home, app, org_state, auth_heade
     assert resp.json()["kind"] == "message"
 
 
-def test_dispatch_rejects_task_followup_purpose(tmp_home, app, org_state, auth_headers):
-    """Spec §6.4: a TASK_FOLLOWUP turn may NOT be used to dispatch new tasks.
+def _manager_followup_for_root(client, org_state, auth_headers, root_id: str):
+    _seed_agent(org_state, "engineering_head", role="manager")
+    tid = _seed_open_thread(org_state, participants=["engineering_head"])
+    root = org_state.db.get_task(root_id)
+    if root is None:
+        org_state.db.insert_task(TaskRecord(
+            id=root_id, brief="original", assigned_agent="engineering_head",
+            team="engineering", status=TaskStatus.FAILED,
+            dispatched_from_thread_id=tid,
+        ))
+        from runtime.infrastructure.audit_logger import AuditLogger
+        AuditLogger(org_state.db).log_thread_dispatch(
+            tid, task_id=root_id, dispatcher="engineering_head",
+            target_agent="engineering_head", team="engineering",
+        )
+    seq = org_state.db.append_thread_message(
+        thread_id=tid, speaker="engineering_head", kind=ThreadMessageKind.SYSTEM,
+        system_payload={
+            "kind_tag": "task_failed", "task_id": root_id,
+            "original_task_id": root_id, "root_task_id": root_id,
+            "status": "failed",
+        },
+    )
+    token = org_state.db.mint_thread_invocation(
+        thread_id=tid, agent_name="engineering_head", triggering_seq=seq,
+        purpose=ThreadInvocationPurpose.TASK_FOLLOWUP,
+    ).invocation_token
+    return tid, token
 
-    Dispatch stays restricted to {REPLY, BOOTSTRAP} only.
-    _validate_invocation_token raises 400 with code "wrong_invocation_purpose"
-    when the purpose is not in require_purposes.
-    """
+
+def _replacement_residue(org_state, tid: str, token: str) -> dict:
+    """Exact durable/queued state owned by one replacement attempt."""
+    conn = org_state.db._conn
+    return {
+        "tasks": conn.execute(
+            "SELECT COUNT(*) FROM tasks WHERE dispatched_from_thread_id = ?", (tid,),
+        ).fetchone()[0],
+        "messages": conn.execute(
+            "SELECT COUNT(*) FROM thread_messages WHERE thread_id = ?", (tid,),
+        ).fetchone()[0],
+        "audits": conn.execute(
+            "SELECT COUNT(*) FROM audit_log WHERE task_id = ? OR "
+            "action = 'thread_task_followup_replacement_dispatched'", (tid,),
+        ).fetchone()[0],
+        "marker": org_state.db.get_invocation_any_status(token).dispatched_task_id,
+    }
+
+
+def _post_replacement(client, tid: str, token: str, auth_headers, *, brief="replacement"):
+    return client.post(
+        f"/api/v1/orgs/alpha/threads/{tid}/dispatch",
+        json={"thread_id": tid, "invocation_token": token,
+              "dispatcher": "engineering_head", "brief": brief},
+        headers=auth_headers,
+    )
+
+
+def test_manager_task_followup_dispatch_creates_one_replacement_root(
+    tmp_home, app, org_state, auth_headers,
+):
     client = TestClient(app)
-    tid, token, _seq = _open_thread_with_followup_token(client, org_state, auth_headers)
+    tid, token = _manager_followup_for_root(
+        client, org_state, auth_headers, "TASK-ORIGINAL",
+    )
 
     resp = client.post(
         f"/api/v1/orgs/alpha/threads/{tid}/dispatch",
         json={
             "thread_id": tid,
             "invocation_token": token,
-            "dispatcher": "dev_agent",
-            "brief": "do something else",
+            "dispatcher": "engineering_head",
+            "brief": "corrected replacement",
         },
         headers=auth_headers,
     )
-    assert resp.status_code == 400, resp.text
-    assert resp.json()["detail"]["code"] == "wrong_invocation_purpose"
+    assert resp.status_code == 200, resp.text
+    replacement = org_state.db.get_task(resp.json()["task_id"])
+    assert replacement.parent_task_id is None
+    assert replacement.dispatched_from_thread_id == tid
+    replacement_audits = org_state.db.get_audit_logs(replacement.id)
+    thread_audits = org_state.db.get_audit_logs(tid)
+    assert [r["action"] for r in replacement_audits] == [
+        "thread_task_followup_replacement_dispatched",
+    ]
+    assert [r["action"] for r in thread_audits] == ["thread_dispatch", "thread_dispatch"]
+    event = replacement_audits[0]
+    assert event["task_id"] == replacement.id
+    assert event["payload"] == {
+        "thread_id": tid,
+        "original_root_task_id": "TASK-ORIGINAL",
+        "replacement_root_task_id": replacement.id,
+        "invocation_token_prefix": token[:8],
+        "dispatcher": "engineering_head",
+        "team": "engineering",
+        "rule_version": "thr-225-v1",
+    }
+    dispatch = thread_audits[-1]
+    assert dispatch["task_id"] == tid
+    assert dispatch["payload"] == {
+        "task_id": replacement.id,
+        "dispatcher": "engineering_head",
+        "target_agent": "engineering_head",
+        "team": "engineering",
+        "replacement_for_task_id": "TASK-ORIGINAL",
+    }
+    assert app.state.daemon.queue._queue.get_nowait() == (
+        "alpha", replacement.id, None,
+    )
+
+    replay = client.post(
+        f"/api/v1/orgs/alpha/threads/{tid}/dispatch",
+        json={"thread_id": tid, "invocation_token": token,
+              "dispatcher": "engineering_head", "brief": "corrected replacement"},
+        headers=auth_headers,
+    )
+    assert replay.status_code == 409
+    assert replay.json()["detail"]["code"] == "task_followup_dispatch_already_used"
+    assert app.state.daemon.queue._queue.empty()
+
+
+def test_task_followup_concurrent_clicks_commit_exactly_once(
+    tmp_home, app, org_state, auth_headers, monkeypatch,
+):
+    client = TestClient(app)
+    tid, token = _manager_followup_for_root(
+        client, org_state, auth_headers, "TASK-CONCURRENT",
+    )
+    async def simultaneous_posts():
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://testserver",
+        ) as async_client:
+            async def post(brief):
+                return await async_client.post(
+                    f"/api/v1/orgs/alpha/threads/{tid}/dispatch",
+                    json={"thread_id": tid, "invocation_token": token,
+                          "dispatcher": "engineering_head", "brief": brief},
+                    headers=auth_headers,
+                )
+            return await asyncio.gather(post("first click"), post("second click"))
+
+    responses = asyncio.run(simultaneous_posts())
+    assert sorted(r.status_code for r in responses) == [200, 409]
+    loser = next(r for r in responses if r.status_code == 409)
+    assert loser.json()["detail"]["code"] == "task_followup_dispatch_already_used"
+    assert org_state.db._conn.execute(
+        "SELECT COUNT(*) FROM audit_log WHERE action = "
+        "'thread_task_followup_replacement_dispatched'",
+    ).fetchone()[0] == 1
+    assert app.state.daemon.queue._queue.qsize() == 1
+
+
+@pytest.mark.parametrize(
+    ("table", "operation"),
+    [
+        ("tasks", "INSERT"),
+        ("thread_messages", "INSERT"),
+        ("thread_invocations", "UPDATE"),
+        ("audit_log", "INSERT"),
+    ],
+)
+def test_task_followup_replacement_write_failure_rolls_back_all_residue(
+    tmp_home, app, org_state, auth_headers, table, operation,
+):
+    client = TestClient(app)
+    tid, token = _manager_followup_for_root(
+        client, org_state, auth_headers, f"TASK-ROLLBACK-{table}",
+    )
+    before = _replacement_residue(org_state, tid, token)
+    org_state.db._conn.execute(
+        f"CREATE TEMP TRIGGER reject_replacement_{table} BEFORE {operation} ON {table} "
+        "BEGIN SELECT RAISE(FAIL, 'injected replacement write failure'); END"
+    )
+    org_state.db._conn.commit()
+    with pytest.raises(Exception, match="injected replacement write failure"):
+        _post_replacement(client, tid, token, auth_headers)
+    assert _replacement_residue(org_state, tid, token) == before
+    assert app.state.daemon.queue._queue.empty()
+
+
+@pytest.mark.parametrize("thread_state", [ThreadStatus.ARCHIVED])
+def test_task_followup_archive_interleaving_rejects_without_residue(
+    tmp_home, app, org_state, auth_headers, thread_state,
+):
+    client = TestClient(app)
+    tid, token = _manager_followup_for_root(
+        client, org_state, auth_headers, f"TASK-{thread_state.value.upper()}",
+    )
+    before = _replacement_residue(org_state, tid, token)
+    org_state.db.set_thread_status(tid, status=thread_state)
+    response = _post_replacement(client, tid, token, auth_headers)
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "thread_not_open"
+    assert _replacement_residue(org_state, tid, token) == before
+    assert app.state.daemon.queue._queue.empty()
+
+
+@pytest.mark.parametrize("source_status", [TaskStatus.CANCELLED, TaskStatus.SUPERSEDED])
+def test_task_followup_terminal_interleaving_uses_committed_status(
+    tmp_home, app, org_state, auth_headers, source_status,
+):
+    client = TestClient(app)
+    root_id = f"TASK-{source_status.value.upper()}"
+    tid, token = _manager_followup_for_root(client, org_state, auth_headers, root_id)
+    org_state.db.update_task(root_id, status=source_status)
+    response = _post_replacement(client, tid, token, auth_headers)
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "task_followup_dispatch_cause_invalid"
+    assert org_state.db.get_invocation_any_status(token).dispatched_task_id is None
+    assert app.state.daemon.queue._queue.empty()
+
+
+def test_task_followup_post_commit_enqueue_failure_is_restart_recoverable(
+    tmp_home, app, org_state, auth_headers, monkeypatch,
+):
+    client = TestClient(app)
+    tid, token = _manager_followup_for_root(
+        client, org_state, auth_headers, "TASK-ENQUEUE-RECOVERY",
+    )
+    monkeypatch.setattr(
+        "runtime.daemon.routes.threads.enqueue_task",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("queue down")),
+    )
+    with pytest.raises(RuntimeError, match="queue down"):
+        _post_replacement(client, tid, token, auth_headers)
+    replacement_id = org_state.db.get_invocation_any_status(token).dispatched_task_id
+    assert replacement_id is not None
+    assert org_state.db.get_task(replacement_id).status is TaskStatus.PENDING
+    assert app.state.daemon.queue._queue.empty()
+    replay = _post_replacement(client, tid, token, auth_headers)
+    assert replay.status_code == 409
+    assert replay.json()["detail"]["code"] == "task_followup_dispatch_already_used"
+    from runtime.daemon.__main__ import _sweep_on_startup
+    _sweep_on_startup(
+        org_state.db, app.state.daemon.queue, "alpha", org_state.orchestrator,
+    )
+    queued = []
+    while not app.state.daemon.queue._queue.empty():
+        queued.append(app.state.daemon.queue._queue.get_nowait())
+    assert queued.count(("alpha", replacement_id, None)) == 1
+
+
+def test_task_followup_replacement_lineage_cannot_dispatch_again(
+    tmp_home, app, org_state, auth_headers,
+):
+    client = TestClient(app)
+    tid, first_token = _manager_followup_for_root(
+        client, org_state, auth_headers, "TASK-ORIGINAL",
+    )
+    first = client.post(
+        f"/api/v1/orgs/alpha/threads/{tid}/dispatch",
+        json={"thread_id": tid, "invocation_token": first_token,
+              "dispatcher": "engineering_head", "brief": "replacement"},
+        headers=auth_headers,
+    )
+    assert first.status_code == 200, first.text
+    replacement_id = first.json()["task_id"]
+    app.state.daemon.queue._queue.get_nowait()
+    org_state.db.update_task(replacement_id, status=TaskStatus.FAILED)
+    from runtime.orchestrator.run_step import _maybe_post_thread_followup
+    _maybe_post_thread_followup(
+        org_state.orchestrator, replacement_id,
+        status=TaskStatus.FAILED, auto_revisit_spawned=False,
+    )
+    second_token = [
+        invocation.invocation_token
+        for invocation in org_state.db.list_thread_invocations(tid)
+        if invocation.purpose is ThreadInvocationPurpose.TASK_FOLLOWUP
+        and invocation.invocation_token != first_token
+    ][0]
+
+    second = client.post(
+        f"/api/v1/orgs/alpha/threads/{tid}/dispatch",
+        json={"thread_id": tid, "invocation_token": second_token,
+              "dispatcher": "engineering_head", "brief": "must not run"},
+        headers=auth_headers,
+    )
+    assert second.status_code == 409, second.text
+    assert second.json()["detail"]["code"] == "task_followup_dispatch_already_used"
+    assert org_state.db.get_invocation_any_status(second_token).dispatched_task_id is None
+    assert app.state.daemon.queue._queue.empty()
+
+
+@pytest.mark.parametrize(
+    ("shape", "parent", "revisit", "status", "root_state"),
+    [
+        ("descendant", True, False, TaskStatus.FAILED, None),
+        ("child_escalation", True, False, TaskStatus.ESCALATED, None),
+        ("retry_revisit", False, True, TaskStatus.FAILED, None),
+        ("inline_chain_leg", True, False, TaskStatus.COMPLETED, "chain"),
+        ("fanout_leg", True, False, TaskStatus.FAILED, "fanout"),
+    ],
+)
+def test_supported_replacement_lineage_shapes_hit_permanent_fence_without_residue(
+    tmp_home, app, org_state, auth_headers,
+    shape, parent, revisit, status, root_state,
+):
+    """Every shipping parent/revisit descendant representation reaches one fence."""
+    client = TestClient(app)
+    tid, first_token = _manager_followup_for_root(
+        client, org_state, auth_headers, f"TASK-ORIGINAL-{shape}",
+    )
+    first = _post_replacement(client, tid, first_token, auth_headers)
+    assert first.status_code == 200
+    replacement_id = first.json()["task_id"]
+    app.state.daemon.queue._queue.get_nowait()
+    source_id = f"TASK-SOURCE-{shape}"
+    source = TaskRecord(
+        id=source_id, brief=shape, assigned_agent="dev_agent", team="engineering",
+        status=TaskStatus.PENDING,
+        parent_task_id=replacement_id if parent else None,
+        revisit_of_task_id=replacement_id if revisit else None,
+        task_type="subtask" if parent else "task",
+    )
+    if root_state == "fanout":
+        assert org_state.db.try_delegate_many(
+            replacement_id, [source], parent_note="fanout",
+            active_fanout_json=json.dumps({"children": [source_id]}),
+        )
+    elif parent:
+        assert org_state.db.try_delegate(
+            replacement_id, source, parent_note=shape,
+            active_chain_json=(json.dumps({"current": source_id})
+                               if root_state == "chain" else None),
+        )
+    else:
+        # The revisit HTTP producer's final persistence seam is insert_task;
+        # revisit_of_task_id is the existing, unchanged lineage authority.
+        org_state.db.insert_task(source)
+    org_state.db.update_task(source_id, status=status)
+    seq = org_state.db.append_thread_message(
+        thread_id=tid, speaker="engineering_head", kind=ThreadMessageKind.SYSTEM,
+        system_payload={
+            "kind_tag": "task_escalated" if status is TaskStatus.ESCALATED else
+                        "task_completed" if status is TaskStatus.COMPLETED else "task_failed",
+            "task_id": source_id, "original_task_id": replacement_id,
+            "root_task_id": replacement_id, "status": status.value,
+        },
+    )
+    token = org_state.db.mint_thread_invocation(
+        thread_id=tid, agent_name="engineering_head", triggering_seq=seq,
+        purpose=ThreadInvocationPurpose.TASK_FOLLOWUP,
+    ).invocation_token
+    before_tasks = len(org_state.db.list_tasks(limit=1000))
+    before_messages = len(org_state.db.list_thread_messages(tid))
+    before_audits = org_state.db._conn.execute(
+        "SELECT COUNT(*) FROM audit_log",
+    ).fetchone()[0]
+    before_root = org_state.db.get_task(replacement_id)
+
+    rejected = _post_replacement(client, tid, token, auth_headers, brief="must reject")
+
+    assert rejected.status_code == 409
+    assert rejected.json()["detail"]["code"] == "task_followup_dispatch_already_used"
+    assert len(org_state.db.list_tasks(limit=1000)) == before_tasks
+    assert len(org_state.db.list_thread_messages(tid)) == before_messages
+    assert org_state.db._conn.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0] == before_audits
+    assert org_state.db.get_invocation_any_status(token).dispatched_task_id is None
+    after_root = org_state.db.get_task(replacement_id)
+    assert (after_root.status, after_root.block_kind, after_root.active_chain,
+            after_root.active_fanout) == (
+        before_root.status, before_root.block_kind, before_root.active_chain,
+        before_root.active_fanout,
+    )
+    assert org_state.db._conn.execute(
+        "SELECT COUNT(*) FROM task_attachments WHERE task_id LIKE 'TASK-%'",
+    ).fetchone()[0] == 0
+    assert app.state.daemon.queue._queue.empty()
+
+
+def test_worker_task_followup_dispatch_is_forbidden(
+    tmp_home, app, org_state, auth_headers,
+):
+    client = TestClient(app)
+    tid, token, _seq = _open_thread_with_followup_token(
+        client, org_state, auth_headers, recipient="dev_agent",
+    )
+    resp = client.post(
+        f"/api/v1/orgs/alpha/threads/{tid}/dispatch",
+        json={"thread_id": tid, "invocation_token": token,
+              "dispatcher": "dev_agent", "brief": "no"},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 403
+    assert resp.json()["detail"]["code"] == "task_followup_dispatch_manager_required"
+
+
+def test_task_followup_dispatch_rejects_noncausal_payload_without_residue(
+    tmp_home, app, org_state, auth_headers,
+):
+    client = TestClient(app)
+    _seed_agent(org_state, "engineering_head", role="manager")
+    tid = _seed_open_thread(org_state, participants=["engineering_head"])
+    seq = org_state.db.append_thread_message(
+        thread_id=tid, speaker="engineering_head", kind=ThreadMessageKind.SYSTEM,
+        system_payload={"kind_tag": "task_failed", "task_id": "TASK-MISSING",
+                        "original_task_id": "TASK-MISSING"},
+    )
+    token = org_state.db.mint_thread_invocation(
+        thread_id=tid, agent_name="engineering_head", triggering_seq=seq,
+        purpose=ThreadInvocationPurpose.TASK_FOLLOWUP,
+    ).invocation_token
+    before = len(org_state.db.list_tasks(limit=1000))
+    resp = client.post(
+        f"/api/v1/orgs/alpha/threads/{tid}/dispatch",
+        json={"thread_id": tid, "invocation_token": token,
+              "dispatcher": "engineering_head", "brief": "no"},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["code"] == "task_followup_dispatch_cause_invalid"
+    assert len(org_state.db.list_tasks(limit=1000)) == before
+    assert org_state.db.get_invocation_any_status(token).dispatched_task_id is None
 
 
 # ---------------------------------------------------------------------------

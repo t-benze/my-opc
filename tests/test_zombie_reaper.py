@@ -21,7 +21,7 @@ from runtime.daemon.zombie_reaper import (
     _sweep_org_zombies,
 )
 from runtime.infrastructure.database import Database
-from runtime.models import BlockKind, TaskRecord, TaskStatus
+from runtime.models import BlockKind, TaskRecord, TaskStatus, ThreadRecord
 
 # ---------------------------------------------------------------------------
 # helpers
@@ -36,6 +36,183 @@ def _ago(seconds: int) -> datetime:
 
 
 ZOMBIE_PID = 99999  # guaranteed-non-existent pid
+
+
+def _seed_zombie_authority_result(tmp_path, *, self_evaluation="valid"):
+    import json
+
+    from runtime.config import Settings
+    from runtime.daemon.queue import TaskQueue
+    from runtime.orchestrator._paths import OrgPaths
+    from runtime.orchestrator.active_authority_policy import (
+        SELF_EVALUATION_CONTRACT_DIGEST,
+        SELF_EVALUATION_CONTRACT_ID,
+        SELF_EVALUATION_CONTRACT_VERSION,
+        ActivePolicySnapshot,
+        persist_session_policy_binding,
+    )
+    from runtime.orchestrator.authority_policy import CONTINUE_ROUTINE_PHRASE
+    from runtime.orchestrator.orchestrator import Orchestrator
+    from runtime.orchestrator.teams import TeamsRegistry
+    from runtime.runtime import RuntimeDir
+    from tests.authority_policy_test_factory import activate_test_policy
+
+    paths = OrgPaths(root=RuntimeDir.init(tmp_path / "rt").orgs_dir / "test")
+    paths.teams_config_path.parent.mkdir(parents=True, exist_ok=True)
+    paths.teams_config_path.write_text(
+        "teams:\n  engineering:\n    manager: engineering_manager\n"
+        "    workers: [dev_agent]\n"
+    )
+    db = Database(paths.db_path)
+    orch = Orchestrator(
+        db=db, settings=Settings(), paths=paths, slug="test",
+        teams=TeamsRegistry.load(paths.root),
+    )
+    orch._queue = TaskQueue()
+    task_id = "T-ZOMBIE-SELF-EVAL"
+    manager = "engineering_manager"
+    session_id = "sess-zombie-self-eval"
+    db.insert_thread(ThreadRecord(id="THR-ZOMBIE-RECOVERY", subject="recovery"))
+    db.insert_task(TaskRecord(
+        id=task_id, brief="zombie test", team="engineering",
+        assigned_agent=manager, status=TaskStatus.IN_PROGRESS,
+        dispatched_from_thread_id="THR-ZOMBIE-RECOVERY",
+    ))
+    from runtime.infrastructure.audit_logger import AuditLogger
+    AuditLogger(db).log_thread_dispatch(
+        "THR-ZOMBIE-RECOVERY", task_id=task_id, dispatcher=manager,
+        target_agent=manager, team="engineering",
+    )
+    db.update_task(
+        task_id, current_session_id=session_id, orchestration_step_count=1,
+    )
+    release, activation = activate_test_policy(db)
+    persist_session_policy_binding(
+        db=db, task_id=task_id, session_id=session_id, agent_name=manager,
+        snapshot=ActivePolicySnapshot(release, activation),
+        provider_id="openai", executor_kind="codex", model_id="gpt-5",
+    )
+    evaluation = {
+        "contract_id": SELF_EVALUATION_CONTRACT_ID,
+        "contract_version": SELF_EVALUATION_CONTRACT_VERSION,
+        "contract_digest": SELF_EVALUATION_CONTRACT_DIGEST,
+        "root_task_id": task_id, "manager_session_id": session_id,
+        "release_id": release.id, "policy_version": str(release.version),
+        "policy_digest": release.policy_digest,
+        "activation_id": activation.id, "activation_epoch": activation.epoch,
+        "provider_id": "openai", "executor_kind": "codex", "model_id": "gpt-5",
+        "disposition": "continue_same_root",
+        "clause_id": "cont-routine-same-root", "action": "continue_same_root",
+        "confidence": 1.0, "uncertainty_codes": [],
+    }
+    if self_evaluation == "mismatch":
+        evaluation["policy_digest"] = "0" * 64
+    decision = {"action": "escalate", "reason": CONTINUE_ROUTINE_PHRASE}
+    if self_evaluation in {"valid", "mismatch"}:
+        decision["_manager_self_evaluation"] = evaluation
+    elif self_evaluation == "malformed":
+        decision["_manager_self_evaluation"] = {"unexpected": True}
+    db.insert_task_result(
+        task_id=task_id, agent=manager, session_id=session_id,
+        status="completed", confidence_score=90, output_summary="escalate",
+        decision_json=json.dumps(decision),
+    )
+    row = db.get_latest_task_result(task_id, manager, session_id)
+    assert row is not None and row["task_id"] == task_id
+    return db, orch, task_id, row
+
+
+def _zombie_outcome(db, task_id):
+    candidates = db.list_authority_candidates_for_root(task_id)
+    assert len(candidates) == 1
+    candidate = candidates[0]
+    evaluation = db.get_authority_evaluation(candidate.id)
+    assert evaluation is not None
+    rows = [r for r in db.get_audit_logs(task_id) if r["action"] == "authority_hook"]
+    assert len(rows) == 1
+    return candidate, evaluation, rows[0]["payload"]
+
+
+def test_consume_zombie_fingerprint_runs_real_authority_path(tmp_path):
+    db, orch, task_id, fingerprint = _seed_zombie_authority_result(tmp_path)
+
+    _consume_zombie_fingerprint(
+        db, task_id, fingerprint, db.get_task(task_id), orch,
+    )
+
+    assert db.get_task(task_id).status is TaskStatus.PENDING
+    assert orch._queue._queue.get_nowait() == ("test", task_id, None)
+    candidate, evaluation, outcome = _zombie_outcome(db, task_id)
+    assert outcome["outcome"] == "continued_same_root"
+    assert evaluation.disposition.value == "continue_same_root"
+    assert candidate.causal_event_id == f"result:{fingerprint['id']}"
+    assert [event.event_type for event in db.list_authority_audit(candidate.id)] == [
+        "candidate_claimed", "evaluation_recorded", "candidate_consumed",
+    ]
+    assert not db.list_thread_messages("THR-ZOMBIE-RECOVERY")
+
+
+@pytest.mark.parametrize("self_evaluation", ["absent", "malformed", "mismatch"])
+def test_consume_zombie_fingerprint_invalid_evidence_fails_closed(
+    tmp_path, self_evaluation,
+):
+    db, orch, task_id, fingerprint = _seed_zombie_authority_result(
+        tmp_path, self_evaluation=self_evaluation,
+    )
+
+    _consume_zombie_fingerprint(
+        db, task_id, fingerprint, db.get_task(task_id), orch,
+    )
+
+    assert db.get_task(task_id).status is TaskStatus.ESCALATED
+    assert orch._queue._queue.empty()
+    _, evaluation, outcome = _zombie_outcome(db, task_id)
+    assert outcome["outcome"] == "escalated"
+    assert outcome["error"]
+    assert evaluation.disposition.value == "escalate"
+    messages = db.list_thread_messages("THR-ZOMBIE-RECOVERY")
+    assert len(messages) == 1
+    assert messages[0].system_payload["kind_tag"] == "task_escalated"
+
+
+def test_consume_zombie_fingerprint_replay_cannot_continue_twice(tmp_path):
+    db, orch, task_id, fingerprint = _seed_zombie_authority_result(tmp_path)
+    task = db.get_task(task_id)
+    _consume_zombie_fingerprint(db, task_id, fingerprint, task, orch)
+    assert orch._queue._queue.get_nowait() == ("test", task_id, None)
+    db.update_task(task_id, status=TaskStatus.IN_PROGRESS, block_kind=None)
+
+    _consume_zombie_fingerprint(db, task_id, fingerprint, db.get_task(task_id), orch)
+
+    assert db.get_task(task_id).status is TaskStatus.ESCALATED
+    assert orch._queue._queue.empty()
+    assert len(db.list_authority_candidates_for_root(task_id)) == 1
+    assert db.execute("SELECT COUNT(*) FROM authority_evaluations").fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("agent", ["dev_agent", "engineering_manager"])
+def test_consume_zombie_fingerprint_worker_and_legacy_compatibility(tmp_path, agent):
+    db, orch, task_id, _ = _seed_zombie_authority_result(tmp_path)
+    compat_id = f"T-ZOMBIE-COMPAT-{agent}"
+    session_id = f"sess-{agent}"
+    db.insert_task(TaskRecord(
+        id=compat_id, brief="compat", team="engineering",
+        assigned_agent=agent, status=TaskStatus.IN_PROGRESS,
+        task_type="subtask",
+    ))
+    db.update_task(compat_id, current_session_id=session_id)
+    db.insert_task_result(
+        task_id=compat_id, agent=agent, session_id=session_id,
+        status="completed", confidence_score=90, output_summary="done",
+    )
+    fingerprint = db.get_latest_task_result(compat_id, agent, session_id)
+
+    _consume_zombie_fingerprint(
+        db, compat_id, fingerprint, db.get_task(compat_id), orch,
+    )
+
+    assert db.get_task(compat_id).status is TaskStatus.COMPLETED
+    assert db.list_authority_candidates_for_root(compat_id) == []
 
 
 def _fresh_hb() -> datetime:

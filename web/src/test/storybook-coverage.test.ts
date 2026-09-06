@@ -170,7 +170,7 @@ describe('Storybook design-system coverage', () => {
       expect(guide.split(`| \`${name}\` |`).length - 1, `${name} ledger rows`).toBe(1);
     }
     const rows = reusableComponents.map(({ name }) => ledgerEntry(name));
-    expect(rows.filter((row) => ledgerMapping(row)).length).toBe(40);
-    expect(rows.filter((row) => row.includes('[excluded:')).length).toBe(4);
+    expect(rows.filter((row) => ledgerMapping(row)).length).toBe(41);
+    expect(rows.filter((row) => row.includes('[excluded:')).length).toBe(3);
   });
 });

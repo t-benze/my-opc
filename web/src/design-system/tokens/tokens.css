@@ -81,6 +81,10 @@
   --color-accent-ring:     rgba(134, 172, 98, 0.45);  /* accent at ~45% */
   --color-accent-text:     oklch(0.46 0.10 152);       /* ds.css --accent-text */
 
+  /* ---- SEMANTIC BRAND IDENTITY ---- */
+
+  --color-brand-foreground: oklch(0.45 0.10 152);
+
   /* ---- TIER / SEMANTIC STATUS ---- */
 
   --color-tier-green:       oklch(0.58 0.11 152);
@@ -265,6 +269,17 @@
   --spacing-7: 3rem;
   --spacing-8: 4rem;
 
+  /* Pasture §4.14 Button values that intentionally sit off the 4/8pt grid. */
+  --spacing-button-gap:       7px;
+  --spacing-button-inline:    14px;
+  --spacing-button-block:     8px;
+  --spacing-button-sm-inline: 10px;
+  --spacing-button-sm-block:  5px;
+  --spacing-button-lg-inline: 20px;
+  --spacing-button-lg-block:  11px;
+  --spacing-button-icon-padding: 7px;
+  --spacing-button-icon-size: 32px;
+
   /* ====================================================================== */
   /* RADIUS — Pasture 8 / 12 / 18 / pill                                     */
   /* ====================================================================== */
@@ -360,6 +375,9 @@
   --color-accent-muted:    oklch(0.32 0.06 152);
   --color-accent-ring:     rgba(165, 207, 112, 0.45);
   --color-accent-text:     oklch(0.80 0.12 152);       /* ds.css --accent-text dark */
+
+  /* ---- Semantic brand identity (dark) ---- */
+  --color-brand-foreground: oklch(0.80 0.12 152);
 
   /* ---- Tier / status (dark) ---- */
   --color-tier-green:       oklch(0.72 0.12 152);

@@ -34,7 +34,10 @@ from runtime.daemon.state import DaemonState
 from runtime.infrastructure.audit_logger import AuditLogger
 from runtime.infrastructure.database import Database
 from runtime.models import BlockKind, TaskStatus
-from runtime.orchestrator.orchestrator import Orchestrator
+from runtime.orchestrator.orchestrator import (
+    Orchestrator,
+    completion_report_from_result_row,
+)
 from runtime.runtime import RuntimeDir
 
 logger = logging.getLogger("happyranch.daemon")
@@ -156,39 +159,9 @@ def _sweep_on_startup(
                     task_id, t.assigned_agent, t.current_session_id,
                 )
             if orphaned_result_row is not None and orchestrator is not None:
-                from runtime.models import CompletionReport, LocalCiEvidence, NextStep
-                import json as _json
-                _raw_decision = orphaned_result_row.get("decision_json")
-                _decision: NextStep | None = None
-                if _raw_decision:
-                    try:
-                        _parsed = _json.loads(_raw_decision)
-                        if isinstance(_parsed, dict):
-                            _decision = NextStep(**_parsed)
-                    except Exception:
-                        _decision = None
-                # Safely parse local_ci from the task_result row.
-                _local_ci_raw = orphaned_result_row.get("local_ci")
-                _local_ci: LocalCiEvidence | None = None
-                if _local_ci_raw:
-                    try:
-                        _parsed = _json.loads(_local_ci_raw)
-                        if isinstance(_parsed, dict):
-                            _local_ci = LocalCiEvidence(**_parsed)
-                    except Exception:
-                        pass
-                orphaned_report = CompletionReport(
-                    task_id=task_id,
-                    agent=orphaned_result_row.get("agent") or (t.assigned_agent or "unknown"),
-                    status=orphaned_result_row.get("status") or "completed",
-                    confidence=orphaned_result_row.get("confidence_score") or 0,
-                    output_summary=orphaned_result_row.get("output_summary") or "",
-                    verdict=orphaned_result_row.get("verdict"),
-                    decision=_decision,
-                    risks_flagged=orphaned_result_row.get("risks_flagged") or [],
-                    output_dir=orphaned_result_row.get("output_dir"),
-                    waiting_on_job_ids=orphaned_result_row.get("waiting_on_job_ids") or [],
-                    local_ci=_local_ci,
+                orphaned_report = completion_report_from_result_row(
+                    task_id, orphaned_result_row,
+                    fallback_agent=t.assigned_agent or "unknown",
                 )
                 # Audit: log the completion report so the consumed result is
                 # visible — the original session's log_completion_report call

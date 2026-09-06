@@ -549,13 +549,21 @@ class Database:
         self._lock_warn_threshold_seconds = 1.0
         self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         from runtime.infrastructure.remote_job_schema import (
-            validate_remote_job_schema_preflight,
+            migrate_identity_enrollment_schema,
+            validate_identity_enrollment_schema_preflight,
         )
 
-        validate_remote_job_schema_preflight(self._conn)
+        # TASK-6611: this fail-closed guard and six-stage convergence are the
+        # first database-open schema/data operation.  In particular they run
+        # before WAL selection and every legacy/jobs/S2/open-path mutator.
+        validate_identity_enrollment_schema_preflight(self._conn)
+        migrate_identity_enrollment_schema(
+            self._conn,
+            stage_hook=getattr(self, "_remote_identity_schema_stage_hook", None),
+        )
+        self._conn.execute("PRAGMA journal_mode=WAL")
         self._migrate_jobs_table_if_needed()
         self._migrate_drop_talk_surface_if_needed()
         self._retire_skill_lifecycle_if_present()
@@ -4635,6 +4643,14 @@ class Database:
                     _local_ci = LocalCiEvidence(**_parsed)
             except Exception:
                 pass
+        manager_self_evaluation = None
+        raw_decision = row["decision_json"] if "decision_json" in keys else None
+        if raw_decision:
+            parsed_decision = json.loads(raw_decision)
+            if isinstance(parsed_decision, dict):
+                manager_self_evaluation = parsed_decision.get(
+                    "_manager_self_evaluation"
+                )
         return CompletionReport(
             task_id=task_id,
             agent=row["agent"],
@@ -4642,6 +4658,7 @@ class Database:
             confidence=row["confidence_score"] or 0,
             output_summary=row["output_summary"] or "",
             verdict=row["verdict"] if "verdict" in keys else None,
+            manager_self_evaluation=manager_self_evaluation,
             output_dir=row["output_dir"] if "output_dir" in keys else None,
             risks_flagged=(
                 json.loads(row["risks_flagged"])
@@ -7075,6 +7092,191 @@ class Database:
         )
         self._conn.commit()
         return cursor.rowcount == 1
+
+    @_synchronized
+    def dispatch_task_followup_replacement(
+        self,
+        *,
+        token: str,
+        thread_id: str,
+        dispatcher: str,
+        task: TaskRecord,
+        team: str,
+    ) -> dict:
+        """Atomically admit the single replacement allowed to a task follow-up.
+
+        The triggering SYSTEM message and the dedicated audit row are the
+        existing persisted authority for the causal-root/replacement relation.
+        No task column is repurposed.  The caller must hold the teams registry
+        lock after establishing that ``dispatcher`` is the team's manager.
+        """
+        now = _now().isoformat()
+        try:
+            self._conn.execute("BEGIN IMMEDIATE")
+            row = self._conn.execute(
+                """SELECT i.triggering_seq, i.dispatched_task_id,
+                          m.system_payload_json
+                     FROM thread_invocations i
+                     JOIN threads t ON t.id = i.thread_id
+                     LEFT JOIN thread_messages m
+                       ON m.thread_id = i.thread_id AND m.seq = i.triggering_seq
+                    WHERE i.invocation_token = ? AND i.thread_id = ?
+                      AND i.agent_name = ? AND i.purpose = 'task_followup'
+                      AND i.status = 'pending' AND t.status = 'open'""",
+                (token, thread_id, dispatcher),
+            ).fetchone()
+            if row is None:
+                self._conn.rollback()
+                return {"ok": False, "code": "task_followup_dispatch_stale"}
+            if row["dispatched_task_id"] is not None:
+                self._conn.rollback()
+                return {"ok": False, "code": "task_followup_dispatch_already_used"}
+            try:
+                payload = json.loads(row["system_payload_json"] or "null")
+            except (TypeError, json.JSONDecodeError):
+                payload = None
+            if not isinstance(payload, dict):
+                self._conn.rollback()
+                return {"ok": False, "code": "task_followup_dispatch_cause_invalid"}
+            original_id = payload.get("original_task_id")
+            source_id = payload.get("task_id")
+            if (
+                payload.get("kind_tag") not in {"task_completed", "task_failed", "task_escalated"}
+                or not isinstance(original_id, str) or not original_id
+                or not isinstance(source_id, str) or not source_id
+            ):
+                self._conn.rollback()
+                return {"ok": False, "code": "task_followup_dispatch_cause_invalid"}
+            source = self._conn.execute(
+                "SELECT status FROM tasks WHERE id = ?", (source_id,),
+            ).fetchone()
+            expected_status = payload.get("status")
+            if (
+                source is None
+                or expected_status != source["status"]
+                or source["status"] not in {
+                    "completed", "failed", "cancelled", "superseded", "escalated",
+                }
+            ):
+                self._conn.rollback()
+                return {"ok": False, "code": "task_followup_dispatch_cause_invalid"}
+            in_lineage = self._conn.execute(
+                """WITH RECURSIVE lineage(id, parent_task_id, revisit_of_task_id, depth) AS (
+                       SELECT id, parent_task_id, revisit_of_task_id, 0
+                         FROM tasks WHERE id = ?
+                       UNION
+                       SELECT t.id, t.parent_task_id, t.revisit_of_task_id, l.depth + 1
+                         FROM lineage l JOIN tasks t
+                           ON t.id = l.parent_task_id OR t.id = l.revisit_of_task_id
+                        WHERE l.depth < 399
+                   ) SELECT 1 FROM lineage WHERE id = ?""",
+                (source_id, original_id),
+            ).fetchone()
+            if in_lineage is None:
+                self._conn.rollback()
+                return {"ok": False, "code": "task_followup_dispatch_cause_invalid"}
+
+            # The causal root must either be the original root dispatched from
+            # this thread, or a root previously created by this exact contract.
+            causal = self._conn.execute(
+                "SELECT dispatched_from_thread_id FROM tasks WHERE id = ? AND parent_task_id IS NULL",
+                (original_id,),
+            ).fetchone()
+            prior_replacement = self._conn.execute(
+                """SELECT 1 FROM audit_log
+                    WHERE task_id = ?
+                      AND action = 'thread_task_followup_replacement_dispatched'""",
+                (original_id,),
+            ).fetchone()
+            original_dispatch = self._conn.execute(
+                """SELECT 1 FROM audit_log
+                    WHERE task_id = ? AND action = 'thread_dispatch'
+                      AND json_extract(payload, '$.task_id') = ?
+                      AND json_extract(payload, '$.dispatcher') = ?""",
+                (thread_id, original_id, dispatcher),
+            ).fetchone()
+            if causal is None or (
+                causal["dispatched_from_thread_id"] != thread_id
+                and prior_replacement is None
+            ) or (prior_replacement is None and original_dispatch is None):
+                self._conn.rollback()
+                return {"ok": False, "code": "task_followup_dispatch_cause_invalid"}
+
+            spent = prior_replacement is not None or self._conn.execute(
+                """SELECT 1 FROM audit_log
+                    WHERE action = 'thread_task_followup_replacement_dispatched'
+                      AND json_extract(payload, '$.original_root_task_id') = ?""",
+                (original_id,),
+            ).fetchone() is not None
+            if spent:
+                self._conn.rollback()
+                return {"ok": False, "code": "task_followup_dispatch_already_used"}
+
+            params = (
+                task.id, task.status.value, task.assigned_agent, task.team,
+                task.brief, task.revision_count, task.created_at.isoformat(),
+                task.updated_at.isoformat(), None, None, None,
+                task.dispatched_from_thread_id, None, task.note,
+                task.orchestration_step_count, task.session_timeout_seconds,
+                task.task_type, task.active_fanout, task.current_session_id, None,
+            )
+            self._conn.execute(
+                """INSERT INTO tasks (id, status, assigned_agent, team, brief,
+                   revision_count, created_at, updated_at, completed_at, parent_task_id,
+                   revisit_of_task_id, dispatched_from_thread_id, block_kind, note,
+                   orchestration_step_count, session_timeout_seconds, task_type,
+                   active_fanout, current_session_id, zombie_flagged_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                params,
+            )
+            sys_seq = self._append_thread_message_uncommitted(
+                thread_id=thread_id, speaker=dispatcher,
+                kind=ThreadMessageKind.SYSTEM,
+                system_payload={
+                    "kind_tag": "task_dispatched", "task_id": task.id,
+                    "dispatcher": dispatcher, "target_agent": dispatcher,
+                    "team": team, "brief_preview": task.brief[:160],
+                    "replacement_for_task_id": original_id,
+                },
+            )
+            changed = self._conn.execute(
+                """UPDATE thread_invocations SET dispatched_task_id = ?
+                     WHERE invocation_token = ? AND status = 'pending'
+                       AND dispatched_task_id IS NULL""",
+                (task.id, token),
+            )
+            if changed.rowcount != 1:
+                self._conn.rollback()
+                return {"ok": False, "code": "task_followup_dispatch_already_used"}
+            audit_payload = {
+                "thread_id": thread_id,
+                "original_root_task_id": original_id,
+                "replacement_root_task_id": task.id,
+                "invocation_token_prefix": token[:8],
+                "dispatcher": dispatcher,
+                "team": team,
+                "rule_version": "thr-225-v1",
+            }
+            self._conn.execute(
+                "INSERT INTO audit_log (task_id, agent, action, payload, timestamp) VALUES (?, ?, ?, ?, ?)",
+                (task.id, dispatcher,
+                 "thread_task_followup_replacement_dispatched",
+                 json.dumps(audit_payload), now),
+            )
+            self._conn.execute(
+                "INSERT INTO audit_log (task_id, agent, action, payload, timestamp) VALUES (?, ?, ?, ?, ?)",
+                (thread_id, dispatcher, "thread_dispatch", json.dumps({
+                    "task_id": task.id, "dispatcher": dispatcher,
+                    "target_agent": dispatcher, "team": team,
+                    "replacement_for_task_id": original_id,
+                }), now),
+            )
+            self._conn.commit()
+            return {"ok": True, "system_message_seq": sys_seq,
+                    "original_root_task_id": original_id}
+        except Exception:
+            self._conn.rollback()
+            raise
 
     @_synchronized
     def fail_invocation(
@@ -11159,6 +11361,92 @@ class Database:
         return 1 if row is None or row["version"] is None else int(row["version"]) + 1
 
     @_synchronized
+    def list_authority_policy_history(
+        self,
+        team: str,
+        *,
+        snapshot_version: int,
+        snapshot_epoch: int,
+        after_version: int | None,
+        after_epoch: int | None,
+        after_release_id: str | None,
+        after_activation_id: str | None,
+        limit: int,
+    ) -> list[dict]:
+        """Read immutable release/activation receipts without policy prose."""
+        rows = self._conn.execute(
+            """SELECT r.id AS release_id,r.policy_id,r.version,r.policy_digest,
+                      r.created_at AS release_created_at,r.actor_kind,
+                      a.id AS activation_id,a.epoch,a.action,
+                      a.created_at AS activation_created_at,a.activation_digest
+               FROM authority_policy_releases r
+               LEFT JOIN authority_policy_activations a
+                 ON a.release_id=r.id AND a.epoch<=?
+               WHERE r.team=? AND r.version<=?
+                 AND (? IS NULL OR (r.version,COALESCE(a.epoch,0),r.id,
+                                      COALESCE(a.id,'')) < (?,?,?,?))
+               ORDER BY r.version DESC,COALESCE(a.epoch,0) DESC,r.id DESC,
+                        COALESCE(a.id,'') DESC LIMIT ?""",
+            (
+                snapshot_epoch, team, snapshot_version, after_version,
+                after_version, after_epoch, after_release_id, after_activation_id,
+                limit,
+            ),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    @_synchronized
+    def get_authority_policy_history_snapshot(self, team: str) -> tuple[int, int]:
+        row = self._conn.execute(
+            """SELECT COALESCE(MAX(r.version),0) AS version,
+                      COALESCE((SELECT MAX(epoch) FROM authority_policy_activations
+                                WHERE team=?),0) AS epoch
+               FROM authority_policy_releases r WHERE r.team=?""",
+            (team, team),
+        ).fetchone()
+        return int(row["version"]), int(row["epoch"])
+
+    @_synchronized
+    def list_authority_policy_outcomes(
+        self,
+        team: str,
+        *,
+        snapshot_created_at: str,
+        snapshot_id: str,
+        after_created_at: str | None,
+        after_id: str | None,
+        limit: int,
+    ) -> list[dict]:
+        """Read the joined immutable evaluation identity; projection authenticates completeness."""
+        rows = self._conn.execute(
+            """SELECT c.*,p.release_id,p.activation_id,p.activation_epoch,
+                      p.provider_id,p.executor_kind,e.id AS evaluation_id,
+                      e.disposition AS evaluation_disposition,e.disposition_code,
+                      e.response_digest,e.created_at AS evaluation_created_at,
+                      env.id AS envelope_id,env.state AS envelope_state,
+                      env.consumed_at AS envelope_consumed_at
+               FROM authority_candidates c
+               LEFT JOIN authority_candidate_policy_pins p ON p.candidate_id=c.id
+               LEFT JOIN authority_evaluations e ON e.candidate_id=c.id
+               LEFT JOIN authority_continue_envelopes env ON env.candidate_id=c.id
+               WHERE c.team=? AND (c.created_at,c.id) <= (?,?)
+                 AND (? IS NULL OR (c.created_at,c.id) < (?,?))
+               ORDER BY c.created_at DESC,c.id DESC LIMIT ?""",
+            (team, snapshot_created_at, snapshot_id, after_created_at,
+             after_created_at, after_id, limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    @_synchronized
+    def get_authority_policy_outcomes_snapshot(self, team: str) -> tuple[str, str] | None:
+        row = self._conn.execute(
+            "SELECT created_at,id FROM authority_candidates WHERE team=? "
+            "ORDER BY created_at DESC,id DESC LIMIT 1",
+            (team,),
+        ).fetchone()
+        return None if row is None else (str(row["created_at"]), str(row["id"]))
+
+    @_synchronized
     def activate_authority_policy(
         self, activation: AuthorityPolicyActivation
     ) -> AuthorityPolicyActivation:
@@ -11275,9 +11563,14 @@ class Database:
                 "ORDER BY epoch DESC LIMIT 1",
                 (team,),
             ).fetchone()
-            if previous is None or previous["epoch"] != expected_previous_epoch:
+            if previous is None:
+                if expected_previous_epoch != 0 or action != "bootstrap":
+                    raise sqlite3.IntegrityError("authority activation bootstrap CAS conflict")
+                epoch = 1
+            elif previous["epoch"] != expected_previous_epoch or action == "bootstrap":
                 raise sqlite3.IntegrityError("authority activation CAS conflict")
-            epoch = previous["epoch"] + 1
+            else:
+                epoch = previous["epoch"] + 1
             created_at = _now()
             activation_id = "APA-" + hashlib.sha256(
                 f"{team}:{request_id}:{request_digest}".encode("utf-8")
@@ -11287,7 +11580,7 @@ class Database:
                 team=team,
                 epoch=epoch,
                 release_id=release_id,
-                previous_activation_id=previous["id"],
+                previous_activation_id=None if previous is None else previous["id"],
                 expected_previous_epoch=expected_previous_epoch,
                 action=action,
                 actor_kind="shared_local_operator_credential",
@@ -11330,7 +11623,7 @@ class Database:
             )
             audit_action = (
                 "authority_policy_activated"
-                if action == "activate"
+                if action in ("activate", "bootstrap")
                 else "authority_policy_reactivated"
             )
             payload = {
