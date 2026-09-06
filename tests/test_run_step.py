@@ -319,7 +319,7 @@ def test_completion_consumer_enforces_manager_session_and_root_gates(
     assert orch._queue.qsize() == 0
 
 
-def test_completion_consumer_rejects_thread_origin_without_founder_side_effects(runtime, db):
+def test_completion_consumer_escalates_thread_origin_rejection_once(runtime, db):
     from runtime.orchestrator.orchestrator import Orchestrator
 
     _claimed_manager_root(db)
@@ -335,10 +335,30 @@ def test_completion_consumer_rejects_thread_origin_without_founder_side_effects(
 
     _consume_manager_supersede(orch, "T-SUP")
 
-    assert db.get_task("T-SUP").status is TaskStatus.IN_PROGRESS
+    task = db.get_task("T-SUP")
+    assert task.status is TaskStatus.ESCALATED
+    assert task.note == (
+        "manager supersession rejected: thread-origin roots are not eligible "
+        "for supersession; founder action required"
+    )
     assert db.execute("SELECT COUNT(*) FROM manager_supersessions").fetchone()[0] == 0
-    assert [row["action"] for row in db.get_audit_logs("T-SUP") if row["action"] == "escalation"] == []
-    assert founder_notifications == []
+    logs = db.get_audit_logs("T-SUP")
+    assert [row["action"] for row in logs].count("orchestration_step") == 1
+    escalation = next(row for row in logs if row["action"] == "escalation")
+    assert escalation["payload"] == {"reason": task.note}
+    authority = next(row for row in logs if row["action"] == "authority_hook")
+    assert authority["payload"] == {
+        "outcome": "not_applicable",
+        "reason_code": "runtime_manager_supersession_thread_origin_ineligible",
+        "reason": "runtime-raised escalation is not an authority decision",
+        "causal_escalation_audit_id": escalation["id"],
+    }
+    assert founder_notifications == [{
+        "task_id": "T-SUP",
+        "agent": "engineering_head",
+        "reason": task.note,
+        "last_summary": "replace the plan",
+    }]
     assert orch._queue.qsize() == 0
 
 
