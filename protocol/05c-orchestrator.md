@@ -1327,6 +1327,15 @@ existing THR-090 zombie-reaper lifecycle evidence plus immediate fail-closed
 OS process/cwd/open-file checks; Git/repository evidence remains a skip rule.
 Small daemon callback payload contracts are unchanged.
 
+THR-195 B1 also defines a dormant `task_scratch_reclamation` engine imported
+only by tests. Its executor accepts immutable finalized ledger rows rather than
+manifest paths or candidate lists, and performs literal-root fd-relative
+no-follow same-device removal with exact allocated-byte/inode accounting and
+protected parent/manifest/lock/sibling postconditions. Sealing requires explicit
+complete lifecycle/liveness/current-boot coverage receipts and the 60-second
+newest-mtime floor. B1 adds no teardown/scheduler caller, activation, deployment,
+live deletion, or legacy-backlog eligibility.
+
 1. **Measures** the OWNING AGENT's workspace with an explicit bounded,
    fail-open budget: one true wall-clock deadline shared across all
    collection — each git subprocess receives ``min(per-call cap, remaining

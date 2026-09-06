@@ -1322,6 +1322,14 @@ to shared ``/tmp``; same-UID post-validation races remain because the
 workspace is not an OS isolation boundary. The daemon still never inspects or
 reclaims ``/tmp``.
 Small atomic daemon callback payloads retain their explicit ``/tmp`` contracts.
+
+THR-195 B1 adds a dormant, production-unreferenced engine whose executor
+accepts only immutable final ledger rows derived from canonical manifests plus
+explicit complete lifecycle, liveness, 60-second newest-mtime, and current-boot
+coverage evidence. It uses fd-relative no-follow same-device removal, exact
+allocated-byte/inode accounting, and manifest/lock/parent/sibling postconditions.
+No production path imports it; teardown/scheduler wiring, activation, live
+deletion, deployment, and legacy backlog eligibility remain absent.
 Runtime-launched task-agent and job subprocesses instead receive one canonical
 mode-0700 root at
 ``<workspace>/.happyranch/task-tmp/<canonical TASK-N>`` through ``TMPDIR``,
