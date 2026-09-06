@@ -1325,10 +1325,13 @@ Small atomic daemon callback payloads retain their explicit ``/tmp`` contracts.
 
 THR-195 B1 adds a dormant, production-unreferenced engine whose executor
 accepts only immutable final ledger rows derived from canonical manifests plus
-bounded typed lifecycle, liveness, 60-second newest-mtime, and current-boot
-coverage evidence that cannot make incomplete, stale-boot, truncated, ambiguous,
-unsupported-platform, recovery/job/live-reference, or unavailable authority
-eligible. It rejects Git/worktree/bare-repository ancestor or descendant evidence
+explicit caller-constructible lifecycle, liveness, and current-boot coverage
+assertion shapes with no permissive defaults. Validation rejects missing,
+malformed, stale-boot, truncated, ambiguous, unsupported-platform,
+recovery/job/live-reference, unavailable, or internally inconsistent values,
+but establishes no provenance or external authority; authoritative producers are
+deferred to B2/B3. It also applies the 60-second newest-mtime floor. It rejects
+Git/worktree/bare-repository ancestor or descendant evidence
 and binds fd-relative no-follow same-device final removal to verified parent/root
 identity plus complete directory-entry/sibling postconditions and exact accounting.
 No production path imports it; teardown/scheduler wiring, activation, live

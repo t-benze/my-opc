@@ -13,6 +13,7 @@ from typing import Mapping
 from runtime.orchestrator.task_scratch import TaskScratchError, validate_task_scratch_manifest
 
 MTIME_FLOOR_NS = 60_000_000_000
+MAX_CENSUS_ENTRIES = 100_000
 
 
 class ReclamationError(RuntimeError):
@@ -49,93 +50,120 @@ class ZombieRecoveryState(StrEnum):
 
 
 @dataclass(frozen=True)
-class LifecycleEvidence:
-    """Bounded projection of existing task/revisit/zombie/job authority."""
+class LifecycleAssertions:
+    """Untrusted caller assertions; B1 does not establish their provenance."""
 
     task_status: str
-    terminal_fingerprint: str
+    terminal_assertion: str
     terminal_observed_at_ns: int
-    nonterminal_revisits: int = 0
-    zombie_recovery: ZombieRecoveryState = ZombieRecoveryState.CLEAR
-    pending_recovery_consumers: int = 0
-    active_jobs: int = 0
-    active_chain_members: int = 0
-    complete: bool = True
+    nonterminal_revisits: int
+    zombie_recovery: ZombieRecoveryState
+    pending_recovery_consumers: int
+    active_jobs: int
+    active_chain_members: int
+    complete: bool
+    truncated: bool
+    ambiguous: bool
+    unavailable: bool
 
     def validate(self) -> None:
         counts = (self.nonterminal_revisits, self.pending_recovery_consumers,
                   self.active_jobs, self.active_chain_members)
-        if (not self.complete or self.task_status not in {"completed", "failed", "cancelled"}
-                or not self.terminal_fingerprint or self.terminal_observed_at_ns < 0
-                or any(not isinstance(value, int) or value < 0 for value in counts)
+        if (type(self.complete) is not bool or type(self.truncated) is not bool
+                or type(self.ambiguous) is not bool or type(self.unavailable) is not bool
+                or not self.complete or self.truncated or self.ambiguous or self.unavailable
+                or self.task_status not in {"completed", "failed", "cancelled"}
+                or not isinstance(self.terminal_assertion, str)
+                or not self.terminal_assertion.strip()
+                or type(self.terminal_observed_at_ns) is not int
+                or self.terminal_observed_at_ns < 0
+                or any(type(value) is not int or value < 0 for value in counts)
                 or self.nonterminal_revisits or self.zombie_recovery is not ZombieRecoveryState.CLEAR
                 or self.pending_recovery_consumers or self.active_jobs or self.active_chain_members):
-            raise ReclamationError("authoritative lifecycle evidence is ineligible")
+            raise ReclamationError("lifecycle assertions are ineligible")
 
 
 @dataclass(frozen=True)
-class LivenessEvidence:
-    """Action-time complete process/session reference census."""
+class LivenessAssertions:
+    """Untrusted caller shape for a future B2 action-time census producer."""
 
-    receipt: str
+    census_assertion: str
     platform: EvidencePlatform
     boot_id: str
     observed_boot_id: str
-    complete: bool = True
-    truncated: bool = False
-    ambiguous: bool = False
-    permission_denied: bool = False
-    live_sessions: int = 0
-    process_roots: int = 0
-    process_cwds: int = 0
-    open_fds: int = 0
+    complete: bool
+    truncated: bool
+    ambiguous: bool
+    permission_denied: bool
+    unavailable: bool
+    live_sessions: int
+    process_roots: int
+    process_cwds: int
+    open_fds: int
 
     def validate(self) -> None:
         counts = (self.live_sessions, self.process_roots, self.process_cwds, self.open_fds)
-        if (not self.receipt or not isinstance(self.platform, EvidencePlatform)
+        flags = (self.complete, self.truncated, self.ambiguous,
+                 self.permission_denied, self.unavailable)
+        if (any(type(value) is not bool for value in flags)
+                or not isinstance(self.census_assertion, str)
+                or not self.census_assertion.strip()
+                or not isinstance(self.platform, EvidencePlatform)
                 or not self.boot_id or self.boot_id != self.observed_boot_id
-                or any(not isinstance(value, int) or value < 0 for value in counts)
-                or not self.complete or self.truncated or self.ambiguous or self.permission_denied
+                or any(type(value) is not int or value < 0 for value in counts)
+                or not self.complete or self.truncated or self.ambiguous
+                or self.permission_denied or self.unavailable
                 or self.live_sessions or self.process_roots or self.process_cwds or self.open_fds):
-            raise ReclamationError("authoritative liveness evidence is ineligible")
+            raise ReclamationError("liveness assertions are ineligible")
 
 
 @dataclass(frozen=True)
-class CoverageEvidence:
-    """Current-boot bounded dominant-consumer classification receipt."""
+class CoverageAssertions:
+    """Untrusted caller shape for a future B3 current-boot coverage producer."""
 
-    receipt: str
-    digest: str
+    coverage_assertion: str
+    digest_assertion: str
     boot_id: str
     observed_boot_id: str
-    complete: bool = True
-    truncated: bool = False
-    ambiguous: bool = False
-    unavailable: bool = False
-    dominant_unclassified: int = 0
-    dominant_durable: int = 0
-    dominant_recovery: int = 0
+    complete: bool
+    truncated: bool
+    ambiguous: bool
+    unavailable: bool
+    dominant_unclassified: int
+    dominant_durable: int
+    dominant_recovery: int
 
     def validate(self) -> None:
         counts = (self.dominant_unclassified, self.dominant_durable, self.dominant_recovery)
-        if (not self.receipt or len(self.digest) != 64 or not self.boot_id
-                or any(not isinstance(value, int) or value < 0 for value in counts)
+        flags = (self.complete, self.truncated, self.ambiguous, self.unavailable)
+        if (any(type(value) is not bool for value in flags)
+                or not isinstance(self.coverage_assertion, str)
+                or not self.coverage_assertion.strip()
+                or not isinstance(self.digest_assertion, str)
+                or len(self.digest_assertion) != 64
+                or any(character not in "0123456789abcdef"
+                       for character in self.digest_assertion)
+                or not isinstance(self.boot_id, str) or not self.boot_id.strip()
+                or not isinstance(self.observed_boot_id, str) or not self.observed_boot_id.strip()
+                or any(type(value) is not int or value < 0 for value in counts)
                 or self.boot_id != self.observed_boot_id or not self.complete or self.truncated
                 or self.ambiguous or self.unavailable or self.dominant_unclassified
                 or self.dominant_durable or self.dominant_recovery):
-            raise ReclamationError("current-boot coverage evidence is ineligible")
+            raise ReclamationError("coverage assertions are ineligible")
 
 
 @dataclass(frozen=True)
-class AuthorityEvidence:
+class ReclamationAssertions:
+    """Untrusted caller-constructible assertions, never authoritative/non-forgeable proof."""
+
     agent_name: str
-    lifecycle: LifecycleEvidence
-    liveness: LivenessEvidence
-    coverage: CoverageEvidence
+    lifecycle: LifecycleAssertions
+    liveness: LivenessAssertions
+    coverage: CoverageAssertions
 
     def validate(self) -> None:
-        if not self.agent_name:
-            raise ReclamationError("agent identity unavailable")
+        if not isinstance(self.agent_name, str) or not self.agent_name.strip():
+            raise ReclamationError("agent assertion unavailable")
         self.lifecycle.validate()
         self.liveness.validate()
         self.coverage.validate()
@@ -162,10 +190,10 @@ class LedgerRow:
     root_device: int
     root_inode: int
     newest_mtime_ns: int
-    terminal_fingerprint: str
-    liveness_receipt: str
-    coverage_receipt: str
-    coverage_digest: str
+    terminal_assertion: str
+    liveness_assertion: str
+    coverage_assertion: str
+    coverage_digest_assertion: str
     entries: tuple[FileIdentity, ...]
     before: Accounting
     protected: tuple[ProtectedIdentity, ...]
@@ -185,7 +213,7 @@ class ReclamationResult:
 
 def _regular_bytes(path: Path) -> tuple[bytes, os.stat_result]:
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         with os.fdopen(fd, "rb") as handle:
             info = os.fstat(handle.fileno())
             if not stat.S_ISREG(info.st_mode):
@@ -212,8 +240,11 @@ def _identity(path: Path, *, digest: bool = False) -> ProtectedIdentity:
     return ProtectedIdentity(str(path), info.st_dev, info.st_ino, checksum)
 
 
-def _census(root: Path) -> tuple[tuple[FileIdentity, ...], Accounting]:
+def _census(root: Path, *, max_entries: int | None = None) -> tuple[tuple[FileIdentity, ...], Accounting]:
     found: list[FileIdentity] = []
+    limit = MAX_CENSUS_ENTRIES if max_entries is None else max_entries
+    if type(limit) is not int or limit < 1:
+        raise ReclamationError("invalid census cap")
 
     def visit(path: Path, relative: str) -> None:
         try:
@@ -222,6 +253,8 @@ def _census(root: Path) -> tuple[tuple[FileIdentity, ...], Accounting]:
             raise ReclamationError("census unavailable") from exc
         found.append(FileIdentity(relative, info.st_dev, info.st_ino, info.st_mode,
                                   info.st_mtime_ns, info.st_blocks * 512, info.st_size))
+        if len(found) > limit:
+            raise ReclamationError("census entry cap exceeded")
         if stat.S_ISDIR(info.st_mode):
             try:
                 children = sorted(os.scandir(path), key=lambda item: item.name)
@@ -237,12 +270,14 @@ def _census(root: Path) -> tuple[tuple[FileIdentity, ...], Accounting]:
                                sum(x.apparent_bytes for x in entries), len(entries))
 
 
-def seal_ledger_row(*, workspace: Path, task_id: str, evidence: AuthorityEvidence,
+def seal_ledger_row(*, workspace: Path, task_id: str, assertions: ReclamationAssertions,
                     now_ns: int, mtime_floor_ns: int = MTIME_FLOOR_NS) -> LedgerRow:
-    """Re-derive a canonical row at action time; never trust manifest paths."""
-    evidence.validate()
-    if now_ns < evidence.lifecycle.terminal_observed_at_ns:
-        raise ReclamationError("terminal evidence is from the future")
+    """Validate untrusted shapes and re-derive a row; B1 proves no assertion provenance."""
+    assertions.validate()
+    if type(now_ns) is not int or type(mtime_floor_ns) is not int or mtime_floor_ns < 0:
+        raise ReclamationError("invalid time assertions")
+    if now_ns < assertions.lifecycle.terminal_observed_at_ns:
+        raise ReclamationError("terminal assertion is from the future")
     try:
         workspace = Path(workspace).resolve(strict=True)
     except OSError as exc:
@@ -279,7 +314,7 @@ def seal_ledger_row(*, workspace: Path, task_id: str, evidence: AuthorityEvidenc
     if _has_repository_evidence(root, workspace):
         raise ReclamationError("git or repository evidence")
     newest = max(item.mtime_ns for item in entries)
-    if newest > evidence.lifecycle.terminal_observed_at_ns or now_ns - newest < mtime_floor_ns:
+    if newest > assertions.lifecycle.terminal_observed_at_ns or now_ns - newest < mtime_floor_ns:
         raise ReclamationError("mtime floor not met")
     siblings = tuple(sorted((_identity(Path(item.path)) for item in os.scandir(parent)
                              if item.name != task_id), key=lambda item: item.path))
@@ -287,16 +322,21 @@ def seal_ledger_row(*, workspace: Path, task_id: str, evidence: AuthorityEvidenc
                  _identity(manifest, digest=True), _identity(lock, digest=True), *siblings)
     manifest_digest = hashlib.sha256(raw).hexdigest()
     payload: Mapping[str, object] = {
-        "task_id": task_id, "agent": evidence.agent_name, "root": str(root),
+        "task_id": task_id, "agent": assertions.agent_name, "root": str(root),
         "manifest_digest": manifest_digest, "device": root_info.st_dev, "inode": root_info.st_ino,
-        "terminal": evidence.lifecycle.terminal_fingerprint, "liveness": evidence.liveness.receipt,
-        "coverage": evidence.coverage.receipt, "coverage_digest": evidence.coverage.digest,
+        "terminal": assertions.lifecycle.terminal_assertion,
+        "liveness": assertions.liveness.census_assertion,
+        "coverage": assertions.coverage.coverage_assertion,
+        "coverage_digest": assertions.coverage.digest_assertion,
         "entries": [x.__dict__ for x in entries], "protected": [x.__dict__ for x in protected],
     }
     fingerprint = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-    return LedgerRow(task_id, evidence.agent_name, str(root), str(manifest), str(lock), manifest_digest,
-                     root_info.st_dev, root_info.st_ino, newest, evidence.lifecycle.terminal_fingerprint,
-                     evidence.liveness.receipt, evidence.coverage.receipt, evidence.coverage.digest,
+    return LedgerRow(task_id, assertions.agent_name, str(root), str(manifest), str(lock), manifest_digest,
+                     root_info.st_dev, root_info.st_ino, newest,
+                     assertions.lifecycle.terminal_assertion,
+                     assertions.liveness.census_assertion,
+                     assertions.coverage.coverage_assertion,
+                     assertions.coverage.digest_assertion,
                      entries, before, protected, fingerprint)
 
 
@@ -305,17 +345,26 @@ def _has_repository_evidence(root: Path, workspace: Path) -> bool:
     def signature(path: Path) -> bool:
         try:
             git = path / ".git"
-            if git.exists(follow_symlinks=False):
+            try:
+                git.stat(follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
                 return True
             head = path / "HEAD"
             objects = path / "objects"
             refs = path / "refs"
-            head_info = head.stat(follow_symlinks=False)
+            try:
+                head_info = head.stat(follow_symlinks=False)
+            except FileNotFoundError:
+                return False
             return (stat.S_ISREG(head_info.st_mode)
                     and stat.S_ISDIR(objects.stat(follow_symlinks=False).st_mode)
                     and stat.S_ISDIR(refs.stat(follow_symlinks=False).st_mode))
-        except OSError:
+        except FileNotFoundError:
             return False
+        except OSError as exc:
+            raise ReclamationError("repository classification unavailable") from exc
 
     cursor = root
     while True:
@@ -348,8 +397,9 @@ def _verify_ledger_identity(row: LedgerRow) -> None:
     payload: Mapping[str, object] = {
         "task_id": row.task_id, "agent": row.agent_name, "root": row.literal_root,
         "manifest_digest": row.manifest_digest, "device": row.root_device, "inode": row.root_inode,
-        "terminal": row.terminal_fingerprint, "liveness": row.liveness_receipt,
-        "coverage": row.coverage_receipt, "coverage_digest": row.coverage_digest,
+        "terminal": row.terminal_assertion, "liveness": row.liveness_assertion,
+        "coverage": row.coverage_assertion,
+        "coverage_digest": row.coverage_digest_assertion,
         "entries": [x.__dict__ for x in row.entries], "protected": [x.__dict__ for x in row.protected],
     }
     actual = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()

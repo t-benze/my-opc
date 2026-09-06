@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import json
 import os
+import inspect
 import threading
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
+import runtime.daemon.task_scratch_reclamation as reclamation
 
 from runtime.daemon.task_scratch_reclamation import (
-    AuthorityEvidence, CoverageEvidence, EvidencePlatform, LifecycleEvidence,
-    LivenessEvidence, ReclamationError, ZombieRecoveryState, execute_ledger, seal_ledger_row,
+    CoverageAssertions, EvidencePlatform, LifecycleAssertions, LivenessAssertions,
+    ReclamationAssertions, ReclamationError, ZombieRecoveryState, execute_ledger, seal_ledger_row,
 )
 from runtime.orchestrator.task_scratch import prepare_task_scratch
 
@@ -25,10 +27,19 @@ def _candidate(tmp_path: Path):
     old = 1_700_000_000_000_000_000
     for path in (contract.root / "nested/file", contract.root / "nested", contract.root):
         os.utime(path, ns=(old, old), follow_symlinks=False)
-    lifecycle = LifecycleEvidence("completed", "terminal:v1", old + 120_000_000_000)
-    liveness = LivenessEvidence("complete-proc-scan", EvidencePlatform.LINUX, "boot-1", "boot-1")
-    coverage = CoverageEvidence("boot-coverage-1", "a" * 64, "boot-1", "boot-1")
-    evidence = AuthorityEvidence("dev_agent", lifecycle, liveness, coverage)
+    lifecycle = LifecycleAssertions(
+        "completed", "terminal:v1", old + 120_000_000_000, 0,
+        ZombieRecoveryState.CLEAR, 0, 0, 0, True, False, False, False,
+    )
+    liveness = LivenessAssertions(
+        "complete-proc-scan", EvidencePlatform.LINUX, "boot-1", "boot-1",
+        True, False, False, False, False, 0, 0, 0, 0,
+    )
+    coverage = CoverageAssertions(
+        "boot-coverage-1", "a" * 64, "boot-1", "boot-1",
+        True, False, False, False, 0, 0, 0,
+    )
+    evidence = ReclamationAssertions("dev_agent", lifecycle, liveness, coverage)
     return workspace, contract, evidence, old
 
 
@@ -38,7 +49,7 @@ def test_removes_only_literal_root_and_preserves_sidecars(tmp_path):
     lock_before = contract.manifest_path.with_suffix(".lock").read_bytes()
     sibling = prepare_task_scratch(workspace=workspace, task_id="TASK-2",
                                    producer_kind="agent", producer_id="sess-2")
-    row = seal_ledger_row(workspace=workspace, task_id="TASK-1", evidence=evidence,
+    row = seal_ledger_row(workspace=workspace, task_id="TASK-1", assertions=evidence,
                           now_ns=old + 121_000_000_000)
     result, = execute_ledger((row,))
     assert result.outcome == "completed"
@@ -50,34 +61,24 @@ def test_removes_only_literal_root_and_preserves_sidecars(tmp_path):
     assert sibling.root.is_dir()
 
 
-@pytest.mark.parametrize("evidence", [
-    AuthorityEvidence("dev", LifecycleEvidence("in_progress", "f", 1),
-                      LivenessEvidence("r", EvidencePlatform.LINUX, "b", "b"),
-                      CoverageEvidence("r", "a" * 64, "b", "b")),
-    AuthorityEvidence("dev", LifecycleEvidence("completed", "f", 1, nonterminal_revisits=1),
-                      LivenessEvidence("r", EvidencePlatform.LINUX, "b", "b"),
-                      CoverageEvidence("r", "a" * 64, "b", "b")),
-    AuthorityEvidence("dev", LifecycleEvidence("completed", "f", 1,
-                                                zombie_recovery=ZombieRecoveryState.PENDING),
-                      LivenessEvidence("r", EvidencePlatform.LINUX, "b", "b"),
-                      CoverageEvidence("r", "a" * 64, "b", "b")),
-    AuthorityEvidence("dev", LifecycleEvidence("completed", "f", 1, active_jobs=1),
-                      LivenessEvidence("r", EvidencePlatform.LINUX, "b", "b"),
-                      CoverageEvidence("r", "a" * 64, "b", "b")),
-    AuthorityEvidence("dev", LifecycleEvidence("completed", "f", 1,
-                                                pending_recovery_consumers=1),
-                      LivenessEvidence("r", EvidencePlatform.LINUX, "b", "b"),
-                      CoverageEvidence("r", "a" * 64, "b", "b")),
-    AuthorityEvidence("dev", LifecycleEvidence("completed", "f", 1,
-                                                active_chain_members=1),
-                      LivenessEvidence("r", EvidencePlatform.LINUX, "b", "b"),
-                      CoverageEvidence("r", "a" * 64, "b", "b")),
+@pytest.mark.parametrize("field,value", [
+    ("task_status", "in_progress"),
+    ("nonterminal_revisits", 1),
+    ("zombie_recovery", ZombieRecoveryState.PENDING),
+    ("zombie_recovery", ZombieRecoveryState.AMBIGUOUS),
+    ("active_jobs", 1),
+    ("pending_recovery_consumers", 1),
+    ("active_chain_members", 1),
+    ("truncated", True),
+    ("ambiguous", True),
+    ("unavailable", True),
 ])
-def test_incomplete_lifecycle_authority_fails_before_ledger(evidence, tmp_path):
-    workspace, _, valid_evidence, old = _candidate(tmp_path)
-    with pytest.raises(ReclamationError):
+def test_incomplete_lifecycle_assertions_fail_before_ledger(field, value, tmp_path):
+    workspace, _, assertions, old = _candidate(tmp_path)
+    with pytest.raises(ReclamationError, match="lifecycle assertions"):
         seal_ledger_row(workspace=workspace, task_id="TASK-1",
-                        evidence=replace(evidence, agent_name=valid_evidence.agent_name),
+                        assertions=replace(assertions, lifecycle=replace(
+                            assertions.lifecycle, **{field: value})),
                         now_ns=old + 121_000_000_000)
 
 
@@ -90,7 +91,7 @@ def test_liveness_ambiguity_and_live_references_fail_closed(field, value, tmp_pa
     workspace, _, evidence, old = _candidate(tmp_path)
     with pytest.raises(ReclamationError, match="liveness"):
         seal_ledger_row(workspace=workspace, task_id="TASK-1",
-                        evidence=replace(evidence, liveness=replace(evidence.liveness, **{field: value})),
+                        assertions=replace(evidence, liveness=replace(evidence.liveness, **{field: value})),
                         now_ns=old + 121_000_000_000)
 
 
@@ -103,20 +104,67 @@ def test_coverage_missing_stale_truncated_or_ambiguous_fails_closed(field, value
     workspace, _, evidence, old = _candidate(tmp_path)
     with pytest.raises(ReclamationError, match="coverage"):
         seal_ledger_row(workspace=workspace, task_id="TASK-1",
-                        evidence=replace(evidence, coverage=replace(evidence.coverage, **{field: value})),
+                        assertions=replace(evidence, coverage=replace(evidence.coverage, **{field: value})),
                         now_ns=old + 121_000_000_000)
+
+
+@pytest.mark.parametrize("shape", [
+    LifecycleAssertions, LivenessAssertions, CoverageAssertions,
+])
+def test_assertion_shapes_have_no_defaults(shape):
+    assert all(parameter.default is inspect.Parameter.empty
+               for parameter in inspect.signature(shape).parameters.values())
+
+
+@pytest.mark.parametrize("component,field,value,error", [
+    ("lifecycle", "terminal_assertion", "", "lifecycle"),
+    ("lifecycle", "terminal_observed_at_ns", True, "lifecycle"),
+    ("lifecycle", "nonterminal_revisits", True, "lifecycle"),
+    ("lifecycle", "zombie_recovery", "clear", "lifecycle"),
+    ("liveness", "census_assertion", "", "liveness"),
+    ("liveness", "complete", 1, "liveness"),
+    ("liveness", "unavailable", True, "liveness"),
+    ("coverage", "coverage_assertion", "", "coverage"),
+    ("coverage", "digest_assertion", "g" * 64, "coverage"),
+    ("coverage", "dominant_durable", True, "coverage"),
+])
+def test_malformed_or_contradictory_assertions_fail_closed(
+        component, field, value, error, tmp_path):
+    workspace, _, assertions, old = _candidate(tmp_path)
+    changed = replace(getattr(assertions, component), **{field: value})
+    with pytest.raises(ReclamationError, match=error):
+        seal_ledger_row(workspace=workspace, task_id="TASK-1",
+                        assertions=replace(assertions, **{component: changed}),
+                        now_ns=old + 121_000_000_000)
+
+
+def test_assertion_provenance_boundary_is_honest(tmp_path):
+    workspace, _, assertions, old = _candidate(tmp_path)
+    fabricated = replace(
+        assertions,
+        lifecycle=replace(assertions.lifecycle, terminal_assertion="caller-made"),
+        liveness=replace(assertions.liveness, census_assertion="caller-made"),
+        coverage=replace(assertions.coverage, coverage_assertion="caller-made",
+                         digest_assertion="0" * 64),
+    )
+    row = seal_ledger_row(workspace=workspace, task_id="TASK-1", assertions=fabricated,
+                          now_ns=old + 121_000_000_000)
+    assert row.terminal_assertion == "caller-made"
+    assert "untrusted" in (ReclamationAssertions.__doc__ or "").lower()
+    assert not any(name.endswith("Evidence") or name == "AuthorityEvidence"
+                   for name in vars(reclamation))
 
 
 def test_unsupported_platform_and_cross_evidence_boot_fail_closed(tmp_path):
     workspace, _, evidence, old = _candidate(tmp_path)
     with pytest.raises(ReclamationError, match="liveness"):
         seal_ledger_row(workspace=workspace, task_id="TASK-1",
-                        evidence=replace(evidence, liveness=replace(
+                        assertions=replace(evidence, liveness=replace(
                             evidence.liveness, platform="windows")),  # type: ignore[arg-type]
                         now_ns=old + 121_000_000_000)
     with pytest.raises(ReclamationError, match="boot mismatch"):
         seal_ledger_row(workspace=workspace, task_id="TASK-1",
-                        evidence=replace(evidence, coverage=replace(
+                        assertions=replace(evidence, coverage=replace(
                             evidence.coverage, boot_id="boot-2", observed_boot_id="boot-2")),
                         now_ns=old + 121_000_000_000)
 
@@ -125,14 +173,14 @@ def test_exact_mtime_boundary_and_terminal_order(tmp_path):
     workspace, _, evidence, old = _candidate(tmp_path)
     evidence = replace(evidence, lifecycle=replace(
         evidence.lifecycle, terminal_observed_at_ns=old))
-    assert seal_ledger_row(workspace=workspace, task_id="TASK-1", evidence=evidence,
+    assert seal_ledger_row(workspace=workspace, task_id="TASK-1", assertions=evidence,
                            now_ns=old + 60_000_000_000).newest_mtime_ns == old
     with pytest.raises(ReclamationError, match="mtime"):
-        seal_ledger_row(workspace=workspace, task_id="TASK-1", evidence=evidence,
+        seal_ledger_row(workspace=workspace, task_id="TASK-1", assertions=evidence,
                         now_ns=old + 59_999_999_999)
     with pytest.raises(ReclamationError, match="mtime"):
         seal_ledger_row(workspace=workspace, task_id="TASK-1",
-                        evidence=replace(evidence, lifecycle=replace(
+                        assertions=replace(evidence, lifecycle=replace(
                             evidence.lifecycle, terminal_observed_at_ns=old - 1)),
                         now_ns=old + 60_000_000_000)
 
@@ -142,7 +190,69 @@ def test_manifest_path_mismatch_and_git_evidence_fail_closed(tmp_path):
     contract.manifest_path.write_text(contract.manifest_path.read_text().replace(
         str(contract.root), "/attacker/root"))
     with pytest.raises(ReclamationError, match="manifest invalid"):
-        seal_ledger_row(workspace=workspace, task_id="TASK-1", evidence=evidence,
+        seal_ledger_row(workspace=workspace, task_id="TASK-1", assertions=evidence,
+                        now_ns=old + 121_000_000_000)
+
+
+@pytest.mark.parametrize("kind", ["symlink", "fifo"])
+def test_manifest_symlink_or_fifo_fails_closed(kind, tmp_path):
+    workspace, contract, assertions, old = _candidate(tmp_path)
+    manifest = contract.manifest_path
+    manifest.unlink()
+    if kind == "symlink":
+        target = tmp_path / "outside-manifest"
+        target.write_text("{}")
+        manifest.symlink_to(target)
+    else:
+        os.mkfifo(manifest)
+    with pytest.raises(ReclamationError):
+        seal_ledger_row(workspace=workspace, task_id="TASK-1", assertions=assertions,
+                        now_ns=old + 121_000_000_000)
+
+
+def test_root_symlink_and_task_prefix_confusion_fail_closed(tmp_path):
+    workspace, contract, assertions, old = _candidate(tmp_path)
+    moved = contract.root.with_name("TASK-10")
+    contract.root.rename(moved)
+    contract.root.symlink_to(moved, target_is_directory=True)
+    with pytest.raises(ReclamationError, match="literal directory"):
+        seal_ledger_row(workspace=workspace, task_id="TASK-1", assertions=assertions,
+                        now_ns=old + 121_000_000_000)
+    assert moved.is_dir()
+
+
+def test_repository_stat_ambiguity_fails_closed(monkeypatch, tmp_path):
+    workspace, contract, assertions, old = _candidate(tmp_path)
+    original = Path.stat
+
+    def denied(path, *args, **kwargs):
+        if path == contract.root / ".git":
+            raise PermissionError("injected")
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", denied)
+    with pytest.raises(ReclamationError, match="repository classification unavailable"):
+        seal_ledger_row(workspace=workspace, task_id="TASK-1", assertions=assertions,
+                        now_ns=old + 121_000_000_000)
+
+
+def test_census_cap_and_read_failure_fail_closed(monkeypatch, tmp_path):
+    workspace, _, assertions, old = _candidate(tmp_path)
+    monkeypatch.setattr(reclamation, "MAX_CENSUS_ENTRIES", 1)
+    with pytest.raises(ReclamationError, match="cap"):
+        seal_ledger_row(workspace=workspace, task_id="TASK-1", assertions=assertions,
+                        now_ns=old + 121_000_000_000)
+    monkeypatch.setattr(reclamation, "MAX_CENSUS_ENTRIES", 100_000)
+    original = os.scandir
+
+    def unavailable(path):
+        if Path(path).name == "nested":
+            raise TimeoutError("injected timeout")
+        return original(path)
+
+    monkeypatch.setattr(os, "scandir", unavailable)
+    with pytest.raises(ReclamationError, match="census unavailable"):
+        seal_ledger_row(workspace=workspace, task_id="TASK-1", assertions=assertions,
                         now_ns=old + 121_000_000_000)
 
 
@@ -153,7 +263,7 @@ def test_repository_and_worktree_signatures_fail_closed(location, tmp_path):
               "ancestor": workspace}[location]
     (target / ".git").write_text("gitdir: /hostile/worktree")
     with pytest.raises(ReclamationError, match="repository"):
-        seal_ledger_row(workspace=workspace, task_id="TASK-1", evidence=evidence,
+        seal_ledger_row(workspace=workspace, task_id="TASK-1", assertions=evidence,
                         now_ns=old + 121_000_000_000)
 
 
@@ -163,7 +273,7 @@ def test_bare_repository_signature_fails_closed(tmp_path):
     (contract.root / "objects").mkdir()
     (contract.root / "refs").mkdir()
     with pytest.raises(ReclamationError, match="repository"):
-        seal_ledger_row(workspace=workspace, task_id="TASK-1", evidence=evidence,
+        seal_ledger_row(workspace=workspace, task_id="TASK-1", assertions=evidence,
                         now_ns=old + 121_000_000_000)
 
 
@@ -196,13 +306,13 @@ def test_hostile_manifest_shapes_fail_closed(mutation, tmp_path):
         manifest.unlink()
         manifest.mkdir()
     with pytest.raises(ReclamationError):
-        seal_ledger_row(workspace=workspace, task_id="TASK-1", evidence=evidence,
+        seal_ledger_row(workspace=workspace, task_id="TASK-1", assertions=evidence,
                         now_ns=old + 121_000_000_000)
     workspace, contract, evidence, old = _candidate(tmp_path / "second")
     (contract.root / ".git").mkdir()
     os.utime(contract.root / ".git", ns=(old, old))
     with pytest.raises(ReclamationError, match="git"):
-        seal_ledger_row(workspace=workspace, task_id="TASK-1", evidence=evidence,
+        seal_ledger_row(workspace=workspace, task_id="TASK-1", assertions=evidence,
                         now_ns=old + 121_000_000_000)
 
 
@@ -214,7 +324,7 @@ def test_symlink_and_fifo_are_unlinked_without_following(tmp_path):
     os.mkfifo(contract.root / "pipe")
     for path in (contract.root / "link", contract.root / "pipe", contract.root):
         os.utime(path, ns=(old, old), follow_symlinks=False)
-    row = seal_ledger_row(workspace=workspace, task_id="TASK-1", evidence=evidence,
+    row = seal_ledger_row(workspace=workspace, task_id="TASK-1", assertions=evidence,
                           now_ns=old + 121_000_000_000)
     result, = execute_ledger((row,))
     assert result.outcome == "completed"
@@ -223,7 +333,7 @@ def test_symlink_and_fifo_are_unlinked_without_following(tmp_path):
 
 def test_post_finalization_mutation_is_rejected_without_reclaimed_claim(tmp_path):
     workspace, contract, evidence, old = _candidate(tmp_path)
-    row = seal_ledger_row(workspace=workspace, task_id="TASK-1", evidence=evidence,
+    row = seal_ledger_row(workspace=workspace, task_id="TASK-1", assertions=evidence,
                           now_ns=old + 121_000_000_000)
     (contract.root / "late").write_text("race")
     result, = execute_ledger((row,))
@@ -232,9 +342,50 @@ def test_post_finalization_mutation_is_rejected_without_reclaimed_claim(tmp_path
     assert contract.root.exists()
 
 
+@pytest.mark.parametrize("target", ["manifest", "lock", "parent-entry", "workspace"])
+def test_protected_path_mutation_fails_with_zero_claim(target, tmp_path):
+    workspace, contract, assertions, old = _candidate(tmp_path)
+    row = seal_ledger_row(workspace=workspace, task_id="TASK-1", assertions=assertions,
+                          now_ns=old + 121_000_000_000)
+    if target == "manifest":
+        contract.manifest_path.write_text(contract.manifest_path.read_text() + " ")
+    elif target == "lock":
+        contract.manifest_path.with_suffix(".lock").write_text("changed")
+    elif target == "parent-entry":
+        (contract.root.parent / "late-sibling").mkdir()
+    else:
+        workspace.rename(tmp_path / "moved-workspace")
+    result, = execute_ledger((row,))
+    assert result.outcome == "failed"
+    assert result.reclaimed_bytes == result.reclaimed_inodes == 0
+
+
+def test_accounting_mismatch_and_unavailable_after_are_zero_claim(monkeypatch, tmp_path):
+    workspace, contract, assertions, old = _candidate(tmp_path)
+    row = seal_ledger_row(workspace=workspace, task_id="TASK-1", assertions=assertions,
+                          now_ns=old + 121_000_000_000)
+    original = reclamation._census
+    calls = 0
+
+    def mismatched(root, **kwargs):
+        nonlocal calls
+        calls += 1
+        entries, accounting = original(root, **kwargs)
+        if calls == 1:
+            return entries, replace(accounting, allocated_bytes=accounting.allocated_bytes + 1)
+        contract.root.rename(contract.root.with_name("unavailable-after"))
+        raise ReclamationError("after unavailable")
+
+    monkeypatch.setattr(reclamation, "_census", mismatched)
+    result, = execute_ledger((row,))
+    assert result.outcome == "failed"
+    assert result.after is None
+    assert result.reclaimed_bytes == result.reclaimed_inodes == 0
+
+
 def test_final_root_rename_recreate_cannot_report_completed(monkeypatch, tmp_path):
     workspace, contract, evidence, old = _candidate(tmp_path)
-    row = seal_ledger_row(workspace=workspace, task_id="TASK-1", evidence=evidence,
+    row = seal_ledger_row(workspace=workspace, task_id="TASK-1", assertions=evidence,
                           now_ns=old + 121_000_000_000)
     original_rmdir = os.rmdir
     renamed = contract.root.with_name("renamed-sealed-root")
@@ -254,7 +405,7 @@ def test_final_root_rename_recreate_cannot_report_completed(monkeypatch, tmp_pat
 
 def test_concurrent_finalizers_yield_one_completion_and_one_failure(tmp_path):
     workspace, _, evidence, old = _candidate(tmp_path)
-    row = seal_ledger_row(workspace=workspace, task_id="TASK-1", evidence=evidence,
+    row = seal_ledger_row(workspace=workspace, task_id="TASK-1", assertions=evidence,
                           now_ns=old + 121_000_000_000)
     barrier = threading.Barrier(2)
     results = []
@@ -276,10 +427,10 @@ def test_per_row_failure_isolated_and_protected_sibling_addition_detected(tmp_pa
     second = prepare_task_scratch(workspace=workspace, task_id="TASK-2",
                                   producer_kind="agent", producer_id="sess-2")
     os.utime(second.root, ns=(old, old))
-    first_row = seal_ledger_row(workspace=workspace, task_id="TASK-1", evidence=evidence,
+    first_row = seal_ledger_row(workspace=workspace, task_id="TASK-1", assertions=evidence,
                                 now_ns=old + 121_000_000_000)
     (first.root.parent / "hostile-sibling").mkdir()
-    second_row = seal_ledger_row(workspace=workspace, task_id="TASK-2", evidence=evidence,
+    second_row = seal_ledger_row(workspace=workspace, task_id="TASK-2", assertions=evidence,
                                  now_ns=old + 121_000_000_000)
     first_result, second_result = execute_ledger((first_row, second_row))
     assert first_result.outcome == "failed"
@@ -293,7 +444,7 @@ def test_partial_syscall_failure_requires_fresh_ledger_retry(monkeypatch, tmp_pa
     for path in (contract.root / "nested/a", contract.root / "nested/z",
                  contract.root / "nested", contract.root):
         os.utime(path, ns=(old, old))
-    row = seal_ledger_row(workspace=workspace, task_id="TASK-1", evidence=evidence,
+    row = seal_ledger_row(workspace=workspace, task_id="TASK-1", assertions=evidence,
                           now_ns=old + 121_000_000_000)
     original_unlink = os.unlink
 
@@ -313,7 +464,7 @@ def test_partial_syscall_failure_requires_fresh_ledger_retry(monkeypatch, tmp_pa
                  contract.root / "nested", contract.root):
         if path.exists():
             os.utime(path, ns=(old, old))
-    fresh = seal_ledger_row(workspace=workspace, task_id="TASK-1", evidence=evidence,
+    fresh = seal_ledger_row(workspace=workspace, task_id="TASK-1", assertions=evidence,
                             now_ns=old + 121_000_000_000)
     retried, = execute_ledger((fresh,))
     assert retried.outcome == "completed"
@@ -321,7 +472,7 @@ def test_partial_syscall_failure_requires_fresh_ledger_retry(monkeypatch, tmp_pa
 
 def test_replayed_row_is_rejected(tmp_path):
     workspace, _, evidence, old = _candidate(tmp_path)
-    row = seal_ledger_row(workspace=workspace, task_id="TASK-1", evidence=evidence,
+    row = seal_ledger_row(workspace=workspace, task_id="TASK-1", assertions=evidence,
                           now_ns=old + 121_000_000_000)
     first, replay = execute_ledger((row, row))
     assert first.outcome == "completed"
@@ -330,7 +481,7 @@ def test_replayed_row_is_rejected(tmp_path):
 
 def test_forged_or_cross_root_ledger_is_rejected(tmp_path):
     workspace, _, evidence, old = _candidate(tmp_path)
-    row = seal_ledger_row(workspace=workspace, task_id="TASK-1", evidence=evidence,
+    row = seal_ledger_row(workspace=workspace, task_id="TASK-1", assertions=evidence,
                           now_ns=old + 121_000_000_000)
     forged = replace(row, literal_root=str(tmp_path))
     result, = execute_ledger((forged,))

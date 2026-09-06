@@ -1331,10 +1331,13 @@ THR-195 B1 also defines a dormant `task_scratch_reclamation` engine imported
 only by tests. Its executor accepts immutable finalized ledger rows rather than
 manifest paths or candidate lists, and performs literal-root fd-relative
 no-follow same-device removal with exact allocated-byte/inode accounting and
-protected parent/manifest/lock/sibling postconditions. Sealing requires explicit
-bounded typed lifecycle/liveness/current-boot coverage evidence that rejects
-missing, stale-boot, truncated, ambiguous, unsupported-platform, recovery/job/live-
-reference, or unavailable authority and the 60-second newest-mtime floor. Final
+protected parent/manifest/lock/sibling postconditions. Sealing accepts explicit
+caller-constructible lifecycle/liveness/current-boot coverage assertion shapes
+with no permissive defaults and rejects missing, malformed, stale-boot, truncated,
+ambiguous, unsupported-platform, recovery/job/live-reference, unavailable, or
+internally inconsistent values. These inputs are untrusted: B1 neither proves
+their provenance nor supplies authoritative producers; those integrations are
+deferred to B2/B3. Sealing also enforces the 60-second newest-mtime floor. Final
 removal is bound to verified parent/root identity and complete sibling/directory-
 entry postconditions; Git/worktree/bare-repository ancestor or descendant evidence
 fails closed. B1 adds no teardown/scheduler caller, activation, deployment,
