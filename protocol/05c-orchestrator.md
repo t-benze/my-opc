@@ -1346,8 +1346,11 @@ Small daemon callback payload contracts are unchanged.
    founder threshold: trigger only when the agent's workspace totals
    >= 1 GiB. Below-threshold state is audited once at that meaningful
    weekly/cooldown boundary, not once per minute for the rest of the week;
-   measurement-unavailable and other exceptional/fail-closed trigger skips
-   remain explicitly audited when the boundary is attempted. A decision-level
+   measurement-unavailable fails open around the numeric threshold gate, so an
+   otherwise-eligible task spawns with unavailable advisory and trigger-audit
+   context; an available numeric below-threshold result skips and remains
+   audited. Other exceptional/fail-closed trigger skips remain explicitly
+   audited. A decision-level
    task-history lookup failure before trigger entry creates no cleanup task and
    emits exactly one ``workspace_cleanup_skipped(history_indeterminate)`` row
    for the crossed boundary; adjacent non-boundary scans remain silent.

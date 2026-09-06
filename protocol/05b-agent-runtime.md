@@ -1256,8 +1256,11 @@ there is no earlier historical backfill across daemon lifetimes.
 Below-threshold state therefore
 emits one ``workspace_cleanup_skipped(workspace_below_threshold)`` audit at a
 meaningful weekly/cooldown boundary, never once per minute for the rest of an
-unserviced week. Measurement-unavailable and the other exceptional/fail-closed
-trigger skips remain explicitly audited when that boundary is attempted. A
+unserviced week. Measurement-unavailable fails open around the numeric
+threshold gate, so an otherwise-eligible task spawns with unavailable advisory
+and trigger-audit context; an available numeric below-threshold result skips
+and remains audited. The other exceptional/fail-closed trigger skips remain
+explicitly audited. A
 decision-level task-history lookup failure before trigger entry creates no
 cleanup task and emits exactly one
 ``workspace_cleanup_skipped(history_indeterminate)`` row for the crossed

@@ -417,6 +417,7 @@ def _walk_workspace(
                 is_symlink = entry.is_symlink()
                 is_dir = entry.is_dir(follow_symlinks=False)
             except OSError:
+                stats.errors += 1
                 continue
             if is_symlink:
                 continue  # never traverse symlinked subtrees
@@ -433,6 +434,7 @@ def _walk_workspace(
                 try:
                     size = entry.stat(follow_symlinks=False).st_size
                 except OSError:
+                    stats.errors += 1
                     continue
                 stats.bytes_total += size
                 if in_dep:
