@@ -17,8 +17,8 @@ cp -R "$fixture/src" "$scratch/src"
 cp "$fixture/allowlist.tsv" "$scratch/allowlist.tsv"
 
 receipt=$(run_scan "$scratch/src" "$scratch/allowlist.tsv")
-grep -F 'Hex scan receipt: denominator=2 production files; hits=11; files=2' <<<"$receipt"
-grep -F 'Hex scan files: App.tsx, theme.css' <<<"$receipt"
+grep -F 'Colour scan receipt: denominator=2 production files; hits=22; files=2' <<<"$receipt"
+grep -F 'Colour scan files: App.tsx, theme.css' <<<"$receipt"
 
 cp -R "$fixture/src" "$scratch/relocated-src"
 sed '1i\\' "$scratch/relocated-src/App.tsx" > "$scratch/App.relocated"
@@ -43,6 +43,7 @@ done
 cp "$fixture/src/App.tsx" "$scratch/src/App.tsx"
 
 printf '\nexport const added = <div className="border-[#445566]" />\n' >> "$scratch/src/App.tsx"
+added_line=$(wc -l < "$scratch/src/App.tsx" | tr -d ' ')
 if run_scan "$scratch/src" "$scratch/allowlist.tsv" >"$scratch/new.out" 2>&1; then
   echo 'expected an unlisted production hit to fail' >&2
   exit 1
@@ -50,8 +51,15 @@ fi
 grep -F 'unlisted hit: App.tsx' "$scratch/new.out"
 grep -F '#445566' "$scratch/new.out"
 
-printf 'App.tsx\t14\t46\t#445566\tfixture added hit\n' >> "$scratch/allowlist.tsv"
+printf 'App.tsx\t%s\t46\t#445566\tfixture added hit\n' "$added_line" >> "$scratch/allowlist.tsv"
 run_scan "$scratch/src" "$scratch/allowlist.tsv" >/dev/null
+
+printf '\nexport const addedPalette = <div className="hover:text-rose-600" />\n' >> "$scratch/src/App.tsx"
+if run_scan "$scratch/src" "$scratch/allowlist.tsv" >"$scratch/palette.out" 2>&1; then
+  echo 'expected an unlisted default palette utility to fail' >&2
+  exit 1
+fi
+grep -F 'text-rose-600' "$scratch/palette.out"
 
 printf '\nexport const duplicate = <div className="border-[#445566]" />\n' >> "$scratch/src/App.tsx"
 if run_scan "$scratch/src" "$scratch/allowlist.tsv" >"$scratch/duplicate.out" 2>&1; then

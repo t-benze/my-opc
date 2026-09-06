@@ -1,9 +1,17 @@
 # path<TAB>line<TAB>column<TAB>value<TAB>specific temporary reason
 design-system/layouts/AppShell/TopBar.tsx	90	28	#4ade80	Retired TopBar Brandmark residue preserved until the later approved cleanup unit
 design-system/layouts/AppShell/TopBar.tsx	113	34	#4ade80	Retired TopBar Happy wordmark residue preserved until the later approved cleanup unit
+design-system/patterns/KbdChip.tsx	19	210	rgba(0,0,0,0.4)	Existing inset-key shadow residue frozen pending a separately reviewed token migration
+design-system/primitives/Dialog.tsx	38	27	bg-black/60	Existing modal scrim palette utility frozen pending a separately reviewed semantic-token migration
+features/settings/SettingsDialog.tsx	474	59	bg-white	Existing checked-control foreground utility frozen pending a separately reviewed semantic-token migration
+features/settings/sections/DaemonCapacitySection.tsx	126	126	text-white	Existing meter-label foreground utility frozen pending a separately reviewed semantic-token migration
+features/settings/sections/OrganizationSection.tsx	586	59	bg-white	Existing checked-control foreground utility frozen pending a separately reviewed semantic-token migration
+features/threads/ThreadsPage.tsx	233	106	text-white	Existing progress-label foreground utility frozen pending a separately reviewed semantic-token migration
 features/todos/strings.ts	70	21	#2b5c3a	Todos active-status text residue preserved for the later approved Todos unit
 features/todos/strings.ts	70	34	#e3efe5	Todos active-status background residue preserved for the later approved Todos unit
 features/todos/strings.ts	73	21	#575249	Todos failed-status text residue preserved for the later approved Todos unit
 features/todos/strings.ts	73	34	#f3e8d6	Todos failed-status background residue preserved for the later approved Todos unit
 features/todos/strings.ts	78	21	#575249	Todos inactive-status text residue preserved for the later approved Todos unit
 features/todos/strings.ts	78	34	#efece2	Todos inactive-status background residue preserved for the later approved Todos unit
+features/work-hours-config/OverviewPage.tsx	123	65	bg-white	Existing progress-label foreground utility frozen pending a separately reviewed semantic-token migration
+features/work-hours-config/TierEditorDialog.tsx	400	69	bg-white	Existing slider-label foreground utility frozen pending a separately reviewed semantic-token migration
