@@ -113,6 +113,21 @@ def test_composite_units_start_services_concurrently_without_readiness_cycle() -
     assert "0.0.0.0" not in connector + sidecar
 
 
+def test_composite_units_share_exact_address_family_sandbox() -> None:
+    units = render_composite_units("/opt/happyranch")
+    expected = "RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK"
+    rendered = {
+        unit: [line for line in text.splitlines() if line.startswith("RestrictAddressFamilies=")]
+        for unit, text in units.items()
+        if unit.endswith(".service")
+    }
+
+    assert rendered == {
+        "happyranch-connector.service": [expected],
+        "happyranch-tsnet-sidecar.service": [expected],
+    }
+
+
 def test_real_systemd_harness_is_zero_skip_and_uses_only_pinned_peer_artifacts() -> None:
     result = subprocess.run(
         ["bash", "-n", "app/linux/package/real_systemd_n3.sh"],
