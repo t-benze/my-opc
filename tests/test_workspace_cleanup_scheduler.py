@@ -509,6 +509,65 @@ async def test_due_scheduler_tick_spawns_when_measurement_is_unavailable(
 
 
 @pytest.mark.asyncio
+async def test_due_tick_spawns_when_partial_traversal_is_unreadable(
+    tmp_path, test_settings, monkeypatch,
+):
+    """A traversal error invalidates already-counted totals at the shipping
+    tick seam, so a partial size can never suppress an otherwise-due run."""
+    db = Database(tmp_path / "db.sqlite")
+    org = _org_with_workspaces(tmp_path, db, test_settings)
+    cfg_path = org.root / "org" / "config.yaml"
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg_path.write_text("timezone: UTC\n")
+    workspace = org.root / "workspaces" / "dev_agent"
+    _write_file(workspace / "readable.txt", 100)
+    unreadable = workspace / "unreadable"
+    unreadable.mkdir()
+
+    real_scandir = wcs.os.scandir
+
+    def partly_unreadable_scandir(path):
+        if Path(path) == unreadable:
+            raise PermissionError("permission denied")
+        return real_scandir(path)
+
+    monkeypatch.setattr(wcs.os, "scandir", partly_unreadable_scandir)
+    state = _FakeDaemonState()
+    occurrence = _sunday_0330_utc()
+
+    await wcs._tick_org(
+        org,
+        state,
+        now_utc=occurrence,
+        previous_scan_utc=occurrence - timedelta(seconds=1),
+    )
+
+    assert len(state.queue.items) == 1
+    task = db.get_task(state.queue.items[0][1])
+    assert task is not None
+    assert task.assigned_agent == "dev_agent"
+    assert "measurement unavailable" in task.brief
+    assert "workspace could not be measured (unreadable)" in task.brief
+    assert "No sizing data was packed" in task.brief
+    assert "workspace total:" not in task.brief
+    skipped = db.get_audit_logs("workspace-cleanup:skipped")
+    assert not any(
+        row["payload"].get("reason") == "workspace_below_threshold"
+        and row["agent"] == "dev_agent"
+        for row in skipped
+    )
+    triggered = db.get_audit_logs(task.id)
+    assert any(
+        row["action"] == "workspace_cleanup_triggered"
+        and row["payload"].get("measurement_available") is False
+        and row["payload"].get("measurement_reason")
+        == "workspace could not be measured (unreadable)"
+        and row["payload"].get("measurement_truncated") is False
+        for row in triggered
+    )
+
+
+@pytest.mark.asyncio
 async def test_trigger_skips_when_agent_team_unresolved(tmp_path, test_settings):
     db = Database(tmp_path / "db.sqlite")
     org_root = tmp_path / "orgs" / "test"

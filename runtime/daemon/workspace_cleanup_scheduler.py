@@ -687,7 +687,7 @@ def _measure(
             "(traversal cardinality cap exceeded)",
             truncated=True,
         )
-    if walk.errors and walk.bytes_total == 0:
+    if walk.errors:
         return snap.unavailable("workspace could not be measured (unreadable)")
 
     snap.workspaces_count = 1
