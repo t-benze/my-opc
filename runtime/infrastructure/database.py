@@ -3760,6 +3760,26 @@ class Database:
         self._conn.commit()
         return cursor.rowcount == 1
 
+    def _has_live_manager_supersession_family_work_uncommitted(
+        self, task_id: str,
+    ) -> bool:
+        """Return whether a supersession family retains live task/job work."""
+        return self._conn.execute(
+            """WITH RECURSIVE family(id) AS (
+                   SELECT ?
+                   UNION ALL
+                   SELECT t.id FROM tasks t JOIN family f ON t.parent_task_id = f.id
+               )
+               SELECT 1 FROM tasks
+                WHERE id IN family AND id != ?
+                  AND status NOT IN ('completed', 'failed', 'cancelled', 'superseded')
+               UNION ALL
+               SELECT 1 FROM jobs
+                WHERE task_id IN family AND status IN ('pending', 'running')
+               LIMIT 1""",
+            (task_id, task_id),
+        ).fetchone() is not None
+
     @_synchronized
     def try_manager_supersede(
         self,
@@ -3798,22 +3818,7 @@ class Database:
             ):
                 self._conn.rollback()
                 return None
-            live_work = self._conn.execute(
-                """WITH RECURSIVE family(id) AS (
-                       SELECT ?
-                       UNION ALL
-                       SELECT t.id FROM tasks t JOIN family f ON t.parent_task_id = f.id
-                   )
-                   SELECT 1 FROM tasks
-                    WHERE id IN family AND id != ?
-                      AND status NOT IN ('completed', 'failed', 'cancelled', 'superseded')
-                   UNION ALL
-                   SELECT 1 FROM jobs
-                    WHERE task_id IN family AND status IN ('pending', 'running')
-                   LIMIT 1""",
-                (task_id, task_id),
-            ).fetchone()
-            if live_work is not None:
+            if self._has_live_manager_supersession_family_work_uncommitted(task_id):
                 self._conn.rollback()
                 return None
             predecessor = row["id"]
@@ -3911,6 +3916,9 @@ class Database:
         now = datetime.now(timezone.utc).isoformat()
         try:
             self._conn.execute("BEGIN IMMEDIATE")
+            if self._has_live_manager_supersession_family_work_uncommitted(task_id):
+                self._conn.rollback()
+                return False
             cursor = self._conn.execute(
                 """UPDATE tasks
                    SET status = ?, block_kind = NULL, note = ?, updated_at = ?
