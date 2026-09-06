@@ -139,6 +139,23 @@ current_terminal_evidence() { current_control_terminal_evidence "$@"; }
 control_terminal_evidence_qualifies() {
   python -c 'import json,sys; d=json.load(sys.stdin); p=d["pinned_invocation"]; assert p["qualifying_receipt_count"] == p["receipt_count"] == 1; assert p["categories"] == ["engine_start"]'
 }
+capture_control_terminal_snapshot() {
+  local cursor="$1" output_path="$2" unit=happyranch-tsnet-sidecar.service
+  local invocation result exec_main_status terminal_evidence
+  # Pin the invocation while the failed unit is still observable. Stopping the
+  # unit settles any pending restart, but reset-failed is destructive to the
+  # properties used for the exact invocation/receipt join and must happen only
+  # after the validated snapshot is durable.
+  invocation="$(systemctl_property "$unit" InvocationID)" || return 1
+  [[ "$invocation" =~ ^[0-9a-f]{32}$ ]] || return 1
+  sudo systemctl stop "$unit" || return 1
+  result="$(systemctl_property "$unit" Result)" || return 1
+  exec_main_status="$(systemctl_property "$unit" ExecMainStatus)" || return 1
+  terminal_evidence="$(current_control_terminal_evidence "$cursor" "$invocation" "$result" "$exec_main_status")" || return 1
+  control_terminal_evidence_qualifies <<<"$terminal_evidence" || return 1
+  printf '%s\n' "$terminal_evidence" >"$output_path"
+  sudo systemctl reset-failed "$unit" || return 1
+}
 systemctl_absent_value() {
   local unit="$1" property="$2" expected="$3" value status
   set +e
@@ -546,8 +563,9 @@ for arm_spec in "${acceptance_arms[@]}"; do
   if [[ "$variant" == control ]]; then
     sleep 2
     ! active happyranch-tsnet-sidecar.service || fail "shipping control unexpectedly READY"
-    IFS=$'\t' read -r arm_invocation_id arm_systemd_result arm_exec_main_status < <(settle_control_terminal_invocation) || fail "shipping control terminal invocation unavailable after stop/reset-failed"
-    redacted_control_evidence="$(current_control_terminal_evidence "$arm_journal_cursor" "$arm_invocation_id" "$arm_systemd_result" "$arm_exec_main_status")" || fail "shipping control terminal evidence unsafe or unavailable"
+    control_snapshot_path="$diagnostics/$arm_id-control-settled-snapshot.json"
+    capture_control_terminal_snapshot "$arm_journal_cursor" "$control_snapshot_path" || fail "shipping control terminal snapshot unsafe or unavailable"
+    redacted_control_evidence="$(<"$control_snapshot_path")"
     printf '{"arm_id":"%s","invocation_binding":"current","terminal_evidence":%s}\n' "$arm_id" "$redacted_control_evidence" >>"$diagnostics/control-terminal-receipts.jsonl"
     control_terminal_evidence_qualifies <<<"$redacted_control_evidence" || fail "shipping control current arm coarse receipt cardinality mismatch"
     python "$evidence_driver" diagnose "$evidence_artifact" --id "$run_id:$arm_id:engine_start" --category engine_start --phase engine_initialization --actor tsnet-sidecar --unit happyranch-tsnet-sidecar.service

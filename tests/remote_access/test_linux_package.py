@@ -238,12 +238,13 @@ def test_real_systemd_control_receipts_are_current_arm_exactly_once() -> None:
     assert 'systemctl_property "$unit" InvocationID' in harness
     assert 'current_control_terminal_evidence' in harness
     assert 'settle_control_terminal_invocation' in harness
-    settle = harness.index('settle_control_terminal_invocation()')
-    stop = harness.index('sudo systemctl stop "$unit"', settle)
-    reset = harness.index('sudo systemctl reset-failed "$unit"', stop)
-    pin = harness.index('invocation="$(systemctl_property', reset)
-    receipt = harness.index('current_control_terminal_evidence()', pin)
-    assert stop < reset < pin < receipt
+    capture = harness.index('capture_control_terminal_snapshot()')
+    pin = harness.index('invocation="$(systemctl_property', capture)
+    stop = harness.index('sudo systemctl stop "$unit"', pin)
+    receipt = harness.index('current_control_terminal_evidence "$cursor"', stop)
+    snapshot = harness.index("printf '%s\\n' \"$terminal_evidence\"", receipt)
+    reset = harness.index('sudo systemctl reset-failed "$unit"', snapshot)
+    assert pin < stop < receipt < snapshot < reset
     assert '"$run_id:$arm_id:engine_start"' in harness
 
 
@@ -393,37 +394,106 @@ def test_real_systemd_control_evidence_rejects_missing_or_ambiguous_properties(
     assert "do-not-emit" not in result.stdout + result.stderr
 
 
-def test_real_systemd_control_settle_is_fail_closed_and_pins_after_stop_reset(tmp_path: Path) -> None:
+def _run_control_snapshot_lifecycle(
+    tmp_path: Path,
+    journal: str,
+    *,
+    invocation: str = "a" * 32,
+    result: str = "exit-code",
+    exec_main_status: str = "1",
+    fail_on: str = "",
+) -> subprocess.CompletedProcess[str]:
     harness = Path("app/linux/package/real_systemd_n3.sh").read_text()
-    helper = "systemctl_property() {" + harness.split("systemctl_property() {", 1)[1].split("\ncurrent_control_terminal_evidence() {", 1)[0]
+    helpers = "systemctl_property() {" + harness.split("systemctl_property() {", 1)[1].split("\nsystemctl_absent_value() {", 1)[0]
     fake_bin = tmp_path / "bin"; fake_bin.mkdir()
     (fake_bin / "sudo").write_text("#!/bin/bash\nexec \"$@\"\n")
     (fake_bin / "systemctl").write_text("""#!/bin/bash
 printf '%s\\n' "$*" >>"$CALL_LOG"
 [[ "${FAIL_ON:-}" != "$1" ]] || exit 7
 case "$*" in
-  "show happyranch-tsnet-sidecar.service -p InvocationID --value") printf '%s\\n' aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ;;
-  "show happyranch-tsnet-sidecar.service -p Result --value") printf '%s\\n' exit-code ;;
-  "show happyranch-tsnet-sidecar.service -p ExecMainStatus --value") printf '%s\\n' 1 ;;
+  "show happyranch-tsnet-sidecar.service -p InvocationID --value") printf '%s\\n' "$FAKE_INVOCATION" ;;
+  "show happyranch-tsnet-sidecar.service -p Result --value") printf '%s\\n' "$FAKE_RESULT" ;;
+  "show happyranch-tsnet-sidecar.service -p ExecMainStatus --value") printf '%s\\n' "$FAKE_STATUS" ;;
+  "reset-failed happyranch-tsnet-sidecar.service") rm -f "$OBSERVABILITY" ;;
 esac
 """)
+    (fake_bin / "journalctl").write_text("""#!/bin/bash
+[[ -e "$OBSERVABILITY" ]] || exit 8
+printf '%s\n' "$FAKE_JOURNAL"
+""")
     for executable in fake_bin.iterdir(): executable.chmod(0o700)
-    script = f"set -euo pipefail\n{helper}\nsettle_control_terminal_invocation"
-    env = os.environ | {"PATH": f"{fake_bin}:{os.environ['PATH']}", "CALL_LOG": str(tmp_path / "calls")}
-    ok = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False, env=env)
+    observable = tmp_path / "unit-observability"; observable.write_text("present")
+    snapshot = tmp_path / "control-snapshot.json"
+    script = f"set -euo pipefail\n{helpers}\ncapture_control_terminal_snapshot cursor-1 \"$SNAPSHOT\"\ncat \"$SNAPSHOT\""
+    env = os.environ | {
+        "PATH": f"{fake_bin}:{os.environ['PATH']}", "CALL_LOG": str(tmp_path / "calls"),
+        "OBSERVABILITY": str(observable), "SNAPSHOT": str(snapshot), "FAKE_JOURNAL": journal,
+        "FAKE_INVOCATION": invocation, "FAKE_RESULT": result, "FAKE_STATUS": exec_main_status,
+        "FAIL_ON": fail_on,
+    }
+    return subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False, env=env)
+
+
+def test_real_systemd_control_snapshot_precedes_observability_destroying_reset(tmp_path: Path) -> None:
+    invocation = "a" * 32
+    ok = _run_control_snapshot_lifecycle(tmp_path, _journal_entry(invocation, _control_receipt()))
     assert ok.returncode == 0, ok.stderr
     assert (tmp_path / "calls").read_text().splitlines() == [
-        "stop happyranch-tsnet-sidecar.service",
-        "reset-failed happyranch-tsnet-sidecar.service",
         "show happyranch-tsnet-sidecar.service -p InvocationID --value",
+        "stop happyranch-tsnet-sidecar.service",
         "show happyranch-tsnet-sidecar.service -p Result --value",
         "show happyranch-tsnet-sidecar.service -p ExecMainStatus --value",
+        "reset-failed happyranch-tsnet-sidecar.service",
     ]
+    assert json.loads(ok.stdout)["pinned_invocation"]["receipt_count"] == 1
+    assert not (tmp_path / "unit-observability").exists()
+
+
+@pytest.mark.parametrize("count", [0, 2])
+def test_real_systemd_control_snapshot_rejects_non_exact_receipt_cardinality(tmp_path: Path, count: int) -> None:
+    journal = "\n".join(_journal_entry("a" * 32, _control_receipt()) for _ in range(count))
+    assert _run_control_snapshot_lifecycle(tmp_path, journal).returncode != 0
+
+
+def test_real_systemd_control_snapshot_rejects_wrong_or_stale_invocation_and_secrets(tmp_path: Path) -> None:
+    wrong = _journal_entry("b" * 32, _control_receipt())
+    wrong_path = tmp_path / "wrong"; wrong_path.mkdir()
+    assert _run_control_snapshot_lifecycle(wrong_path, wrong).returncode != 0
+    secret = _journal_entry("a" * 32, _control_receipt(secret="credential=do-not-emit"))
+    secret_path = tmp_path / "secret"; secret_path.mkdir()
+    rejected = _run_control_snapshot_lifecycle(secret_path, secret)
+    assert rejected.returncode != 0
+    assert "do-not-emit" not in rejected.stdout + rejected.stderr
+
+
+@pytest.mark.parametrize("invocation", ["", "a" * 31, "a" * 32 + "\nb" * 32])
+def test_real_systemd_control_snapshot_rejects_missing_or_ambiguous_invocation(
+    tmp_path: Path, invocation: str,
+) -> None:
+    journal = _journal_entry("a" * 32, _control_receipt())
+    assert _run_control_snapshot_lifecycle(tmp_path, journal, invocation=invocation).returncode != 0
+
+
+@pytest.mark.parametrize("result_value,status", [("", "1"), ("exit-code\nfailed", "1"), ("exit-code", ""), ("exit-code", "1\n2")])
+def test_real_systemd_control_snapshot_rejects_ambiguous_properties(
+    tmp_path: Path, result_value: str, status: str,
+) -> None:
+    journal = _journal_entry("a" * 32, _control_receipt())
+    assert _run_control_snapshot_lifecycle(tmp_path, journal, result=result_value, exec_main_status=status).returncode != 0
+
+
+def test_real_systemd_control_snapshot_is_reusable_after_cleanup(tmp_path: Path) -> None:
+    journal = _journal_entry("a" * 32, _control_receipt())
+    result = _run_control_snapshot_lifecycle(tmp_path, journal)
+    assert result.returncode == 0, result.stderr
+    assert _qualify_control_terminal_evidence(result.stdout).returncode == 0
+
+
+def test_real_systemd_control_snapshot_fails_closed_on_stop_or_reset(tmp_path: Path) -> None:
+    journal = _journal_entry("a" * 32, _control_receipt())
     for failed_command in ("stop", "reset-failed"):
-        failed = subprocess.run(
-            ["bash", "-c", script], capture_output=True, text=True, check=False,
-            env=env | {"FAIL_ON": failed_command},
-        )
+        case_path = tmp_path / failed_command; case_path.mkdir()
+        failed = _run_control_snapshot_lifecycle(case_path, journal, fail_on=failed_command)
         assert failed.returncode != 0
 
 
