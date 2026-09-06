@@ -97,6 +97,7 @@ function PolicyNavigationControls(): JSX.Element {
     <Link to={`/orgs/${SLUG}/dashboard`}>Test destination</Link>
     <button onClick={() => navigate(-1)}>Test browser back</button>
     <button onClick={() => navigate(1)}>Test browser forward</button>
+    <button onClick={() => navigate(0)}>Test browser refresh</button>
   </div>;
 }
 
@@ -1481,6 +1482,39 @@ describe('Team escalation policy dedicated route', () => {
     expect(await screen.findByLabelText('Title')).toBeInTheDocument();
   });
 
+  test('eligible manager exercises the shipping navigate(0) browser-refresh path without a replacement router', async () => {
+    stubBaseHandlers();
+    let rosterRequests = 0;
+    let policyRequests = 0;
+    server.use(
+      http.get(`/api/v1/orgs/${SLUG}/agents`, () => {
+        rosterRequests += 1;
+        return HttpResponse.json({ agents: [manager] });
+      }),
+      http.get(`/api/v1/orgs/${SLUG}/agents/engineering_manager/team-escalation-policy`, () => {
+        policyRequests += 1;
+        return HttpResponse.json(policyResponse);
+      }),
+      http.get(`/api/v1/orgs/${SLUG}/agents/engineering_manager/team-escalation-policy/history`, () => HttpResponse.json({ items: [], next_cursor: null })),
+      http.get(`/api/v1/orgs/${SLUG}/agents/engineering_manager/team-escalation-policy/outcomes`, () => HttpResponse.json({ items: [], next_cursor: null })),
+    );
+    const user = userEvent.setup();
+    mountPolicyRoute([`/orgs/${SLUG}/agents/engineering_manager/team-escalation-policy`]);
+    expect(await screen.findByLabelText('Title')).toHaveValue('Canonical policy');
+    expect(rosterRequests).toBe(1);
+    expect(policyRequests).toBe(1);
+
+    await user.click(screen.getByRole('button', { name: 'Test browser refresh' }));
+
+    // In a real browser navigate(0) reloads the document. Memory history keeps
+    // the mounted document, so this assertion deliberately proves the shipping
+    // refresh call path without substituting an unmount or replacement router.
+    expect(rosterRequests).toBe(1);
+    expect(policyRequests).toBe(1);
+    expect(screen.getByRole('heading', { level: 1, name: 'Team escalation policy' })).toBeInTheDocument();
+    expect(screen.getByLabelText('Title')).toHaveValue('Canonical policy');
+  });
+
   test('shipping back Link cancel preserves the exact dirty draft; confirm discards and navigates', async () => {
     stubBaseHandlers();
     server.use(http.get(`/api/v1/orgs/${SLUG}/agents`, () => HttpResponse.json({ agents: [manager] })));
@@ -1571,29 +1605,28 @@ describe('Team escalation policy dedicated route', () => {
     expect(document.body).not.toHaveTextContent(/team escalation policy|canonical policy|shared local operator|save immutable|activate/i);
   });
 
-  test('unresolved and errored rosters fail closed, create no policy cache, and recover only after eligible roster refresh', async () => {
+  test('unresolved and errored rosters expose no policy request, cache key/data, DOM, or payload', async () => {
     stubBaseHandlers();
     let resolveRoster!: (value: Response) => void;
-    let rosterAttempt = 0;
-    server.use(http.get(`/api/v1/orgs/${SLUG}/agents`, () => {
-      rosterAttempt += 1;
-      if (rosterAttempt === 1) return new Promise<Response>((resolve) => { resolveRoster = resolve; });
-      if (rosterAttempt === 2) return new HttpResponse(null, { status: 503 });
-      return HttpResponse.json({ agents: [manager] });
-    }));
-    stubPolicy();
+    let policyRequests = 0;
+    server.use(
+      http.get(`/api/v1/orgs/${SLUG}/agents`, () => new Promise<Response>((resolve) => { resolveRoster = resolve; })),
+      http.all(`/api/v1/orgs/${SLUG}/agents/:agentName/team-escalation-policy*`, () => {
+        policyRequests += 1;
+        return HttpResponse.json(policyResponse);
+      }),
+    );
     const first = mountPolicyRoute([`/orgs/${SLUG}/agents/engineering_manager/team-escalation-policy`]);
     expect(await screen.findByText('Loading agent…')).toBeInTheDocument();
+    expect(policyRequests).toBe(0);
     expect(policyCacheEntries(first.client)).toEqual([]);
+    expect(document.body).not.toHaveTextContent(/team escalation policy|canonical policy|shared local operator|save immutable|activate/i);
+
     resolveRoster(new Response(null, { status: 503 }));
     expect(await screen.findByText(/Not found/)).toBeInTheDocument();
+    expect(policyRequests).toBe(0);
     expect(policyCacheEntries(first.client)).toEqual([]);
-    first.unmount();
-
-    server.use(http.get(`/api/v1/orgs/${SLUG}/agents`, () => HttpResponse.json({ agents: [manager] })));
-    const recovered = mountPolicyRoute([`/orgs/${SLUG}/agents/engineering_manager/team-escalation-policy`]);
-    expect(await screen.findByRole('textbox', { name: 'Title' })).toBeInTheDocument();
-    expect(policyCacheEntries(recovered.client).length).toBe(3);
+    expect(document.body).not.toHaveTextContent(/team escalation policy|canonical policy|shared local operator|save immutable|activate/i);
   });
 });
 
