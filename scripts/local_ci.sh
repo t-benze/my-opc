@@ -13,8 +13,9 @@
 #
 # Targets:
 #   python       uv sync --frozen; uv run pytest tests/ -v -n 4
-#   web          cd web; npm ci; npm run lint; npm run typecheck;
-#                npm run build; npm run build-storybook; npx vitest run
+#   web          cd web; npm ci; design-system colour gate; npm run lint;
+#                npm run typecheck; npm run build; npm run build-storybook;
+#                npx vitest run
 #   integration  uv sync --frozen; uv run pytest tests/ -v -m integration
 #   all          python + web (default; mirrors GitHub PR CI)
 #   help         Show this help
@@ -212,6 +213,8 @@ run_web() {
   echo -e "${GREEN}=== Web CI ===${NC}"
   cd web
   npm ci
+  echo -e "${YELLOW}--- Design-system colour gate ---${NC}"
+  bash scripts/verify-design-system-colour-gate.sh
   echo -e "${YELLOW}--- Lint ---${NC}"
   npm run lint
   echo -e "${YELLOW}--- Typecheck ---${NC}"
@@ -248,7 +251,7 @@ show_help() {
   echo "  python       Run Python unit tests"
   echo "               (uv sync --frozen + uv run pytest tests/ -v -n 4)"
   echo "  web          Run Web CI"
-  echo "               (npm ci + lint + typecheck + build + build-storybook + vitest run)"
+  echo "               (npm ci + colour gate + lint + typecheck + build + build-storybook + vitest run)"
   echo "  integration  Run Python integration tests"
   echo "               (uv run pytest tests/ -v -m integration)"
   echo "  all          Default: runs python + web (mirrors GitHub PR CI)"

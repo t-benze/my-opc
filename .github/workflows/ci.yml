@@ -51,6 +51,8 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - name: Install dependencies
         run: npm ci
+      - name: Design-system colour gate
+        run: bash scripts/verify-design-system-colour-gate.sh
       - name: Lint
         run: npm run lint
       - name: Typecheck
