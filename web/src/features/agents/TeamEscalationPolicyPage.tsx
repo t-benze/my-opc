@@ -25,14 +25,14 @@ export function TeamEscalationPolicyPage(): JSX.Element {
 
   return (
     <div className="bg-surface-canvas h-full overflow-y-auto">
-      <main className="mx-auto w-full max-w-4xl p-4 sm:p-6" aria-labelledby="team-policy-page-heading">
+      <section className="mx-auto w-full max-w-4xl p-4 sm:p-6" aria-labelledby="team-policy-page-heading">
         <Button asChild variant="ghost" size="sm"><Link to={routes.detail(policyAgent.name)}>← Back to Engineering Manager</Link></Button>
         <header className="mt-4 mb-5">
           <h1 id="team-policy-page-heading" className="font-display text-text-primary text-2xl font-medium">Team escalation policy</h1>
           <p className="text-text-muted mt-1 text-sm">Engineering · Engineering Manager</p>
         </header>
         <TeamEscalationPolicyCard agent={policyAgent} onDirtyChange={setDirty} />
-      </main>
+      </section>
       <Dialog open={blocker.state === 'blocked'} onOpenChange={(open) => { if (!open && blocker.state === 'blocked') blocker.reset(); }}>
         <DialogContent aria-label="discard policy draft confirmation">
           <DialogHeader>

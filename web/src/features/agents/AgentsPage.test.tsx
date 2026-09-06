@@ -1477,6 +1477,7 @@ describe('Team escalation policy dedicated route', () => {
     );
     mountPolicyRoute([`/orgs/${SLUG}/agents/engineering_manager/team-escalation-policy`]);
     expect(await screen.findByRole('heading', { level: 1, name: 'Team escalation policy' })).toBeInTheDocument();
+    expect(screen.getAllByRole('main')).toHaveLength(1);
     expect(screen.getByText('Engineering · Engineering Manager')).toBeInTheDocument();
     expect(screen.getByRole('link', { name: /Back to Engineering Manager/ })).toHaveAttribute('href', `/orgs/${SLUG}/agents/engineering_manager`);
     expect(await screen.findByLabelText('Title')).toBeInTheDocument();
