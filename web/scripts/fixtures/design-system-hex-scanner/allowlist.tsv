@@ -8,5 +8,23 @@ App.tsx	5	58	#334455	fixture arbitrary Tailwind gradient to color
 App.tsx	5	75	#445566	fixture arbitrary Tailwind divide color
 App.tsx	5	97	#556677	fixture arbitrary Tailwind placeholder color
 App.tsx	5	119	#667788	fixture arbitrary Tailwind ring-offset color
-App.tsx	8	18	#010203	fixture JSX color attribute
+App.tsx	6	34	bg-red-500/25	fixture default Tailwind palette utility
+App.tsx	6	54	rgb(1_2_3)	fixture arbitrary Tailwind rgb colour
+App.tsx	6	74	oklch(50%_0.2_20)	fixture arbitrary Tailwind oklch colour
+App.tsx	6	99	rebeccapurple	fixture arbitrary Tailwind named colour
+App.tsx	6	128	rgb(4_5_6)	fixture arbitrary Tailwind shadow colour
+App.tsx	11	18	#010203	fixture JSX color attribute
+App.tsx	11	35	tomato	fixture JSX named colour attribute
+App.tsx	11	50	rgb(7 8 9)	fixture JSX rgb colour attribute
+App.tsx	18	19	text-transparent	fixture default Tailwind transparent colour
+App.tsx	18	36	bg-current	fixture default Tailwind current colour
+App.tsx	18	47	border-inherit	fixture default Tailwind inherited colour
+App.tsx	19	28	rgb(var(--raw-rgb))	fixture nested rgb channel syntax
+App.tsx	19	68	hsl(var(--raw-hsl) / 50%)	fixture nested hsl channel syntax
 theme.css	2	17	#c0ffee	fixture ordinary CSS color declaration
+theme.css	3	10	rgb(1 2 3 / 40%)	fixture CSS rgb colour
+theme.css	4	15	hsl(120deg 50% 50%)	fixture CSS hsl colour
+theme.css	5	18	rebeccapurple	fixture CSS named colour value
+theme.css	6	21	oklab(50% 0.1 0.1)	fixture CSS oklab shadow colour
+theme.css	14	10	rgb(var(--raw-rgb))	fixture nested CSS rgb channel syntax
+theme.css	15	21	hsl(var(--raw-hsl) / 50%)	fixture nested CSS hsl channel syntax

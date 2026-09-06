@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
 #
 # CI gate for the web design system. Runs typecheck + lint + tests +
-# deterministic Storybook static build + complete production-source hex scan.
+# deterministic Storybook static build + complete production-source colour scan.
 #
 # Exit codes:
 #   0 — clean
 #   1 — typecheck, lint, test, or build failure
-#   3 — production hex baseline mismatch
+#   3 — production colour baseline mismatch
 #
 # Run locally before pushing: `bash scripts/verify-design-system.sh`
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-scan_hex() {
+scan_colours() {
   local source_root=${DESIGN_SYSTEM_SOURCE_ROOT:-src}
   local allowlist=${DESIGN_SYSTEM_HEX_ALLOWLIST:-scripts/design-system-hex-allowlist.tsv}
 
@@ -31,6 +31,33 @@ extensions = {".css", ".js", ".jsx", ".ts", ".tsx"}
 excluded_directories = {"__snapshots__", "__tests__", "reports", "screenshots", "test"}
 
 hex_value = r"#[0-9a-fA-F]{3}(?:[0-9a-fA-F](?:[0-9a-fA-F]{2}){0,2})?"
+colour_properties = r"(?:color|background|border|fill|stroke|shadow|outline|decoration|accent|caret)"
+colour_utilities = r"(?:bg|text|border|outline|ring|ring-offset|divide|decoration|accent|caret|fill|stroke|shadow|from|via|to|placeholder)"
+palette = r"(?:slate|gray|zinc|neutral|stone|red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose)"
+named_colours = {
+    "aliceblue", "antiquewhite", "aqua", "aquamarine", "azure", "beige", "bisque", "black",
+    "blanchedalmond", "blue", "blueviolet", "brown", "burlywood", "cadetblue", "chartreuse",
+    "chocolate", "coral", "cornflowerblue", "cornsilk", "crimson", "cyan", "darkblue", "darkcyan",
+    "darkgoldenrod", "darkgray", "darkgreen", "darkgrey", "darkkhaki", "darkmagenta",
+    "darkolivegreen", "darkorange", "darkorchid", "darkred", "darksalmon", "darkseagreen",
+    "darkslateblue", "darkslategray", "darkslategrey", "darkturquoise", "darkviolet", "deeppink",
+    "deepskyblue", "dimgray", "dimgrey", "dodgerblue", "firebrick", "floralwhite", "forestgreen",
+    "fuchsia", "gainsboro", "ghostwhite", "gold", "goldenrod", "gray", "green", "greenyellow",
+    "grey", "honeydew", "hotpink", "indianred", "indigo", "ivory", "khaki", "lavender",
+    "lavenderblush", "lawngreen", "lemonchiffon", "lightblue", "lightcoral", "lightcyan",
+    "lightgoldenrodyellow", "lightgray", "lightgreen", "lightgrey", "lightpink", "lightsalmon",
+    "lightseagreen", "lightskyblue", "lightslategray", "lightslategrey", "lightsteelblue",
+    "lightyellow", "lime", "limegreen", "linen", "magenta", "maroon", "mediumaquamarine",
+    "mediumblue", "mediumorchid", "mediumpurple", "mediumseagreen", "mediumslateblue",
+    "mediumspringgreen", "mediumturquoise", "mediumvioletred", "midnightblue", "mintcream",
+    "mistyrose", "moccasin", "navajowhite", "navy", "oldlace", "olive", "olivedrab", "orange",
+    "orangered", "orchid", "palegoldenrod", "palegreen", "paleturquoise", "palevioletred",
+    "papayawhip", "peachpuff", "peru", "pink", "plum", "powderblue", "purple", "rebeccapurple",
+    "red", "rosybrown", "royalblue", "saddlebrown", "salmon", "sandybrown", "seagreen",
+    "seashell", "sienna", "silver", "skyblue", "slateblue", "slategray", "slategrey", "snow",
+    "springgreen", "steelblue", "tan", "teal", "thistle", "tomato", "turquoise", "violet",
+    "wheat", "white", "whitesmoke", "yellow", "yellowgreen",
+}
 # Any Tailwind utility (including variants and negative/important forms) whose
 # arbitrary value is itself a hex color. Keeping the utility name structural
 # covers the full color-capable vocabulary without treating issue references
@@ -38,6 +65,76 @@ hex_value = r"#[0-9a-fA-F]{3}(?:[0-9a-fA-F](?:[0-9a-fA-F]{2}){0,2})?"
 tailwind = re.compile(rf"(?<![\w-])(?:[a-z][\w-]*:)*!?-?[a-z][\w-]*-\[({hex_value})\](?![0-9a-fA-F])", re.IGNORECASE)
 css_or_object = re.compile(rf"(?:^|[;{{,])\s*(?:--[\w-]+|[\w-]*(?:color|background|border|fill|stroke|shadow|outline|decoration|accent|caret)[\w-]*)\s*:\s*['\"]?({hex_value})(?![0-9a-fA-F])", re.IGNORECASE)
 jsx_attribute = re.compile(rf"\b(?:color|fill|stroke)\s*=\s*(?:['\"]|{{\s*['\"])({hex_value})(?![0-9a-fA-F])", re.IGNORECASE)
+jsx_colour_attribute = re.compile(r"\b(?:color|fill|stroke)\s*=\s*(?:['\"]|\{\s*['\"])([^'\"}\n]+)", re.IGNORECASE)
+palette_scale = r"(?:50|[1-9]00|950)"
+special_colour = r"(?:black|white|transparent|current|inherit)"
+default_tailwind = re.compile(rf"(?<![\w-])(?:[a-z][\w-]*:)*!?-?({colour_utilities}-(?:(?:{palette})-{palette_scale}|{special_colour})(?:/\d{{1,3}})?)(?![\w-])", re.IGNORECASE)
+arbitrary_tailwind = re.compile(rf"(?<![\w-])(?:[a-z][\w-]*:)*!?-?{colour_utilities}-\[([^\]\n]+)\]", re.IGNORECASE)
+declaration = re.compile(rf"(?:^|[;{{,])\s*(?:--[\w-]+|[\w-]*{colour_properties}[\w-]*)\s*:\s*([^;}}\n]+)", re.IGNORECASE)
+colour_function_start = re.compile(r"(?<![\w-])(?:rgb|rgba|hsl|hsla|oklch|oklab|color)\(", re.IGNORECASE)
+
+def colour_functions(value: str) -> list[tuple[int, str]]:
+    """Return balanced supported colour functions, including nested var()."""
+    found: list[tuple[int, str]] = []
+    cursor = 0
+    while match := colour_function_start.search(value, cursor):
+        depth = 1
+        end = match.end()
+        while end < len(value) and depth:
+            if value[end] == "(":
+                depth += 1
+            elif value[end] == ")":
+                depth -= 1
+            end += 1
+        if depth:
+            cursor = match.end()
+            continue
+        found.append((match.start(), value[match.start():end].lower()))
+        cursor = end
+    return found
+
+def complete_named_colour(value: str) -> tuple[int, str] | None:
+    leading = len(value) - len(value.lstrip())
+    candidate = value.strip()
+    if (len(candidate) >= 2 and candidate[0] == candidate[-1] and candidate[0] in "'\""):
+        candidate = candidate[1:-1].strip()
+        leading += 1
+    important = re.fullmatch(r"([a-z]+)(?:\s*!important)?", candidate, re.IGNORECASE)
+    if important and important.group(1).lower() in named_colours:
+        return leading, important.group(1).lower()
+    return None
+
+def non_hex_value_matches(contents: str) -> list[tuple[int, str]]:
+    found: list[tuple[int, str]] = []
+    for match in default_tailwind.finditer(contents):
+        found.append((match.start(1), match.group(1).lower()))
+    for match in arbitrary_tailwind.finditer(contents):
+        value = match.group(1)
+        lowered = value.lower()
+        normalized = lowered.replace("_", " ")
+        functions = colour_functions(normalized)
+        if functions:
+            for start, function in functions:
+                found.append((match.start(1) + start, function.replace(" ", "_")))
+        elif lowered in named_colours:
+            found.append((match.start(1), lowered))
+    for match in declaration.finditer(contents):
+        value = match.group(1)
+        base = match.start(1)
+        for start, function in colour_functions(value):
+            found.append((base + start, function))
+        if named := complete_named_colour(value):
+            start, candidate = named
+            found.append((base + start, candidate))
+    for match in jsx_colour_attribute.finditer(contents):
+        value = match.group(1)
+        base = match.start(1)
+        for start, function in colour_functions(value):
+            found.append((base + start, function))
+        if named := complete_named_colour(value):
+            start, candidate = named
+            found.append((base + start, candidate))
+    return found
 
 def is_production_file(path: Path) -> bool:
     relative = path.relative_to(source_root)
@@ -59,6 +156,7 @@ for path in files:
     matches: list[tuple[int, str]] = []
     for pattern in (tailwind, css_or_object, jsx_attribute):
         matches.extend((match.start(1), match.group(1).lower()) for match in pattern.finditer(contents))
+    matches.extend(non_hex_value_matches(contents))
     for offset, value in sorted(set(matches)):
         line = contents.count("\n", 0, offset) + 1
         previous_newline = contents.rfind("\n", 0, offset)
@@ -84,8 +182,8 @@ for number, raw in enumerate(allowlist_path.read_text(encoding="utf-8").splitlin
     if line < 1 or column < 1:
         errors.append(f"invalid allowlist row {number}: line and column must be positive integers")
         continue
-    if value != value.lower() or not re.fullmatch(hex_value, value):
-        errors.append(f"invalid allowlist row {number}: color must be normalized lowercase hex")
+    if value != value.lower() or any(character in value for character in "\t\r\n"):
+        errors.append(f"invalid allowlist row {number}: value must be normalized lowercase scanner output")
         continue
     allowed.append((path, line, column, value, reason))
 
@@ -102,10 +200,10 @@ for (path, line, column, value), count in sorted(stale.items()):
     errors.extend([f"stale allowlist entry: {path}:{line}:{column}\t{value}\t{reason}"] * count)
 
 hit_files = sorted({path for path, _line, _column, _value in hits})
-print(f"Hex scan receipt: denominator={len(files)} production files; hits={len(hits)}; files={len(hit_files)}")
-print("Hex scan files: " + (", ".join(hit_files) if hit_files else "(none)"))
+print(f"Colour scan receipt: denominator={len(files)} production files; hits={len(hits)}; files={len(hit_files)}")
+print("Colour scan files: " + (", ".join(hit_files) if hit_files else "(none)"))
 if errors:
-    print("FAIL: production hex baseline mismatch:", file=sys.stderr)
+    print("FAIL: production colour baseline mismatch:", file=sys.stderr)
     for error in errors:
         print(f"  {error}", file=sys.stderr)
     sys.exit(3)
@@ -113,7 +211,7 @@ PY
 }
 
 if [ "${1:-}" = "--scan-hex" ]; then
-  scan_hex
+  scan_colours
   exit $?
 fi
 
@@ -129,7 +227,7 @@ npm test -- --run
 echo "==> Build Storybook"
 npm run build-storybook
 
-echo "==> Production hex baseline"
-scan_hex
+echo "==> Production colour baseline"
+scan_colours
 
 echo "All design-system checks passed."
