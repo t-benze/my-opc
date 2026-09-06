@@ -231,6 +231,24 @@ describe('AgentsPage — two-pane roster list', () => {
 });
 
 describe('AgentDetailPane — editable fields', () => {
+  test('eligible manager detail shows only compact active status and dedicated-page control', async () => {
+    stubBaseHandlers(); stubDetailHandlers();
+    const manager = { ...AGENTS_PAYLOAD.agents[0], name: 'engineering_manager' };
+    server.use(
+      http.get(`/api/v1/orgs/${SLUG}/agents`, () => HttpResponse.json({ agents: [manager] })),
+      http.get(`/api/v1/orgs/${SLUG}/agents/engineering_manager/team-escalation-policy`, () => HttpResponse.json({
+        team: 'engineering', target_manager: 'engineering_manager', can_mutate: true,
+        bootstrap_template: { title: 'Canonical policy', normative_text: 'Policy', clauses: [], continuation_phrase: 'routine same-root follow-through of the already-completed slice' },
+        active: { epoch: 4, release: { version: 2, digest: 'abcdef1234567890' } },
+      })),
+    );
+    mountAt(`/orgs/${SLUG}/agents/engineering_manager`);
+    expect(await screen.findByText(/Active v2 · epoch 4 · abcdef123456/)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Open team escalation policy' })).toHaveAttribute('href', `/orgs/${SLUG}/agents/engineering_manager/team-escalation-policy`);
+    expect(screen.queryByLabelText('Title')).not.toBeInTheDocument();
+    expect(screen.queryByText('Immutable release history')).not.toBeInTheDocument();
+  });
+
   test('omits the team policy card from a worker detail pane', async () => {
     stubBaseHandlers();
     stubDetailHandlers();
@@ -1389,6 +1407,44 @@ describe('AgentsPage — route collision regression', () => {
     await waitFor(() =>
       expect(screen.getByText('worker')).toBeInTheDocument(),
     );
+  });
+});
+
+describe('Team escalation policy dedicated route', () => {
+  const manager = {
+    name: 'engineering_manager', team: 'engineering', role: 'manager',
+    executor: 'codex', model: null, description: 'Owns engineering.', repos: {}, system_prompt: 'Manager.',
+  };
+
+  test('eligible deep link resolves after roster eligibility and provides context/back link', async () => {
+    stubBaseHandlers();
+    server.use(
+      http.get(`/api/v1/orgs/${SLUG}/agents`, () => HttpResponse.json({ agents: [manager] })),
+      http.get(`/api/v1/orgs/${SLUG}/agents/engineering_manager/team-escalation-policy`, () => HttpResponse.json({
+        team: 'engineering', target_manager: 'engineering_manager', can_mutate: true,
+        bootstrap_required: true,
+        bootstrap_template: { title: 'Canonical policy', normative_text: 'Policy', clauses: [], continuation_phrase: 'routine same-root follow-through of the already-completed slice' },
+      })),
+      http.get(`/api/v1/orgs/${SLUG}/agents/engineering_manager/team-escalation-policy/history`, () => HttpResponse.json({ items: [], next_cursor: null })),
+      http.get(`/api/v1/orgs/${SLUG}/agents/engineering_manager/team-escalation-policy/outcomes`, () => HttpResponse.json({ items: [], next_cursor: null })),
+    );
+    mountAt(`/orgs/${SLUG}/agents/engineering_manager/team-escalation-policy`);
+    expect(await screen.findByRole('heading', { level: 1, name: 'Team escalation policy' })).toBeInTheDocument();
+    expect(screen.getByText('Engineering · Engineering Manager')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /Back to Engineering Manager/ })).toHaveAttribute('href', `/orgs/${SLUG}/agents/engineering_manager`);
+    expect(await screen.findByLabelText('Title')).toBeInTheDocument();
+  });
+
+  test('worker deep link fails closed without any policy request or policy wording', async () => {
+    stubBaseHandlers();
+    let policyRequests = 0;
+    server.use(
+      http.all(`/api/v1/orgs/${SLUG}/agents/:agentName/team-escalation-policy*`, () => { policyRequests += 1; return new HttpResponse(null, { status: 500 }); }),
+    );
+    mountAt(`/orgs/${SLUG}/agents/support_agent/team-escalation-policy`);
+    expect(await screen.findByText(/Not found/)).toBeInTheDocument();
+    expect(screen.queryByText(/team escalation policy/i)).not.toBeInTheDocument();
+    expect(policyRequests).toBe(0);
   });
 });
 

@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { Link } from 'react-router-dom';
 import { AlertCircle } from 'lucide-react';
 import { Button } from '@/design-system/primitives/Button';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/design-system/primitives/Dialog';
 import { ApiError } from '@/lib/api';
 import {
   type AuthorityPolicyTemplate,
@@ -10,6 +12,20 @@ import {
   useTeamEscalationPolicyHistory,
   useTeamEscalationPolicyOutcomes,
 } from '@/hooks/authorityPolicy';
+import { useAgentsRoutes } from '@/hooks/agents';
+
+export function TeamEscalationPolicyEntryCard({ agent }: { agent: { name: string; team: string; role: string } }): JSX.Element {
+  const query = useTeamEscalationPolicy(agent);
+  const routes = useAgentsRoutes();
+  return (
+    <PolicyShell>
+      <h3 className="font-display text-text-primary text-base font-medium">Manager-only team escalation policy</h3>
+      <p className="text-text-muted mt-1 text-xs">Engineering Manager access only.</p>
+      {query.isLoading ? <p className="text-text-muted mt-3 text-xs">Loading active policy status…</p> : query.isError || !query.data ? <p role="alert" className="text-tier-red mt-3 text-xs">Could not load policy status.</p> : query.data.active ? <p className="text-text-muted mt-3 text-xs">Active v{query.data.active.release.version} · epoch {query.data.active.epoch} · {query.data.active.release.digest.slice(0, 12)}</p> : <p className="text-text-muted mt-3 text-xs">No active release. Canonical bootstrap is available.</p>}
+      <Button asChild size="sm" className="mt-3"><Link to={routes.policy(agent.name)}>Open team escalation policy</Link></Button>
+    </PolicyShell>
+  );
+}
 
 export function TeamEscalationPolicyCard({ agent }: { agent: { name: string; team: string; role: string } }): JSX.Element {
   const query = useTeamEscalationPolicy(agent);
@@ -39,12 +55,19 @@ export function TeamEscalationPolicyCard({ agent }: { agent: { name: string; tea
     setSavedInactive(null);
   }, [source]);
 
+  const dirty = draft ? JSON.stringify(draft) !== baseline : false;
+  useEffect(() => {
+    if (!dirty) return;
+    const warn = (event: BeforeUnloadEvent) => event.preventDefault();
+    window.addEventListener('beforeunload', warn);
+    return () => window.removeEventListener('beforeunload', warn);
+  }, [dirty]);
+
   if (query.isLoading) return <PolicyShell><p className="text-text-muted text-sm">Loading team policy…</p></PolicyShell>;
   if (query.isError || !query.data || !draft) {
     return <PolicyShell><div role="alert" className="text-tier-red flex flex-wrap items-center gap-2 text-sm"><AlertCircle size={14} /><span>Could not load the team policy.</span><Button size="sm" variant="ghost" onClick={() => void query.refetch()}>Retry</Button></div></PolicyShell>;
   }
 
-  const dirty = JSON.stringify(draft) !== baseline;
   const expected = query.data.bootstrap_template;
   const validationError = validateDraft(draft, expected);
   const active = query.data.active;
@@ -145,7 +168,15 @@ export function TeamEscalationPolicyCard({ agent }: { agent: { name: string; tea
         <input readOnly className="border-border-subtle bg-surface-sunken mt-1 w-full rounded-md border px-3 py-2 font-mono text-xs" value={draft.continuation_phrase} />
       </label>
       {(validationError || message) && <p role="status" className={`mt-3 text-xs ${validationError ? 'text-tier-red' : 'text-text-secondary'}`}>{validationError ?? message}</p>}
-      {confirm && <div role="dialog" aria-modal="true" aria-label="activate policy confirmation" className="border-border-default mt-3 rounded-md border p-3 text-sm"><p>{confirm === 'activate' ? 'Save a new immutable version and activate it?' : `Reactivate immutable version ${confirm.version} as a new epoch?`}</p><div className="mt-2 flex gap-2"><Button size="sm" onClick={() => { if (confirm === 'activate') { setConfirm(null); void save(true); } else { void rollback(confirm); } }}>Confirm</Button><Button size="sm" variant="ghost" onClick={() => setConfirm(null)}>Cancel</Button></div></div>}
+      <Dialog open={confirm !== null} onOpenChange={(open) => { if (!open) setConfirm(null); }}>
+        <DialogContent aria-label="activate policy confirmation">
+          <DialogHeader>
+            <DialogTitle>Confirm policy activation</DialogTitle>
+            <DialogDescription>{confirm === 'activate' ? 'Save a new immutable version and activate it?' : confirm ? `Reactivate immutable version ${confirm.version} as a new epoch?` : ''}</DialogDescription>
+          </DialogHeader>
+          <DialogFooter><Button size="sm" onClick={() => { if (confirm === 'activate') { setConfirm(null); void save(true); } else if (confirm) { void rollback(confirm); } }}>Confirm</Button><Button size="sm" variant="ghost" onClick={() => setConfirm(null)}>Cancel</Button></DialogFooter>
+        </DialogContent>
+      </Dialog>
       <div className="mt-4 flex flex-wrap gap-2">
         <Button size="sm" disabled={!dirty || !!validationError || createRelease.isPending} onClick={() => void save(false)}>Save immutable version</Button>
         <Button size="sm" disabled={!dirty || !!validationError || createRelease.isPending} onClick={() => setConfirm('activate')}>Save &amp; activate</Button>
