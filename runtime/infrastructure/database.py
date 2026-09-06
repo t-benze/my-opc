@@ -3891,6 +3891,75 @@ class Database:
             raise
 
     @_synchronized
+    def try_reject_thread_origin_manager_supersede(
+        self,
+        task_id: str,
+        *,
+        actor_agent: str,
+        actor_session_id: str,
+        expected_team: str,
+        reason: str,
+        reason_code: str,
+    ) -> bool:
+        """Atomically escalate one currently claimed, thread-origin manager root.
+
+        This is the ineligible counterpart to ``try_manager_supersede``.  Its
+        complete claim predicate is evaluated under the same transaction as
+        the state and audit writes, so a competing continuation, block, or
+        cancellation wins without any rejection side effects.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        try:
+            self._conn.execute("BEGIN IMMEDIATE")
+            cursor = self._conn.execute(
+                """UPDATE tasks
+                   SET status = ?, block_kind = NULL, note = ?, updated_at = ?
+                   WHERE id = ?
+                     AND status = 'in_progress'
+                     AND block_kind IS NULL
+                     AND cancelled_at IS NULL
+                     AND task_type = 'task'
+                     AND parent_task_id IS NULL
+                     AND assigned_agent = ?
+                     AND team = ?
+                     AND current_session_id = ?
+                     AND active_chain IS NULL
+                     AND active_fanout IS NULL
+                     AND blocked_on_job_ids IS NULL
+                     AND dispatched_from_thread_id IS NOT NULL
+                     AND dispatched_from_thread_id != ''""",
+                (
+                    TaskStatus.ESCALATED.value, reason, now, task_id,
+                    actor_agent, expected_team, actor_session_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                self._conn.rollback()
+                return False
+            escalation_audit_id = self.insert_audit_log_uncommitted(
+                task_id=task_id,
+                agent=actor_agent,
+                action="escalation",
+                payload={"reason": reason},
+            )
+            self.insert_audit_log_uncommitted(
+                task_id=task_id,
+                agent=actor_agent,
+                action="authority_hook",
+                payload={
+                    "outcome": "not_applicable",
+                    "reason_code": reason_code,
+                    "reason": "runtime-raised escalation is not an authority decision",
+                    "causal_escalation_audit_id": escalation_audit_id,
+                },
+            )
+            self._conn.commit()
+            return True
+        except Exception:
+            self._conn.rollback()
+            raise
+
+    @_synchronized
     def try_delegate(
         self, parent_id: str, child: TaskRecord, *, parent_note: str,
         attachments: list[dict] | None = None,

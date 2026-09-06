@@ -676,10 +676,12 @@ def _consume_completion_report(
                 "manager supersession rejected: thread-origin roots are not "
                 "eligible for supersession; founder action required"
             )
-            if db.try_escalate_runtime(
+            if db.try_reject_thread_origin_manager_supersede(
                 task_id,
+                actor_agent=agent,
+                actor_session_id=task.current_session_id,
+                expected_team=task.team,
                 reason=reason,
-                agent=agent,
                 reason_code=(
                     "runtime_manager_supersession_thread_origin_ineligible"
                 ),

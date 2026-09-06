@@ -362,6 +362,68 @@ def test_completion_consumer_escalates_thread_origin_rejection_once(runtime, db)
     assert orch._queue.qsize() == 0
 
 
+@pytest.mark.parametrize(
+    ("status", "block_kind"),
+    [
+        (TaskStatus.PENDING, None),
+        (TaskStatus.IN_PROGRESS, BlockKind.DELEGATED),
+        (TaskStatus.CANCELLED, None),
+    ],
+    ids=["pending", "blocked", "cancelled"],
+)
+def test_completion_consumer_thread_origin_rejection_preserves_competing_state(
+    runtime, db, monkeypatch, status: TaskStatus, block_kind: BlockKind | None,
+):
+    """A transition immediately before the rejection CAS remains authoritative."""
+    from runtime.orchestrator.orchestrator import Orchestrator
+
+    _claimed_manager_root(db)
+    db.execute("UPDATE tasks SET dispatched_from_thread_id = 'THR-152' WHERE id = 'T-SUP'")
+    db._conn.commit()
+    orch = Orchestrator(
+        db=db, settings=Settings(), paths=runtime, slug="test",
+        teams=TeamsRegistry.load(runtime.root),
+    )
+    orch._queue = _SlugQueue()
+    founder_notifications: list[dict] = []
+    thread_projections: list[tuple] = []
+    orch.notify_escalated = lambda **kwargs: founder_notifications.append(kwargs)
+    monkeypatch.setattr(
+        "runtime.orchestrator.run_step._maybe_post_thread_escalation",
+        lambda *args, **kwargs: thread_projections.append((args, kwargs)),
+    )
+    real_reject = db.try_reject_thread_origin_manager_supersede
+
+    def competing_transition_wins(*args, **kwargs):
+        db.update_task(
+            "T-SUP", status=status, block_kind=block_kind,
+            note="competing transition",
+            **({
+                "cancelled_at": "2026-09-06T00:00:00+00:00",
+                "completed_at": "2026-09-06T00:00:00+00:00",
+            } if status is TaskStatus.CANCELLED else {}),
+        )
+        return real_reject(*args, **kwargs)
+
+    monkeypatch.setattr(
+        db, "try_reject_thread_origin_manager_supersede", competing_transition_wins,
+    )
+
+    _consume_manager_supersede(orch, "T-SUP")
+
+    task = db.get_task("T-SUP")
+    assert task.status is status
+    assert task.block_kind is block_kind
+    assert task.note == "competing transition"
+    assert not [
+        row for row in db.get_audit_logs("T-SUP")
+        if row["action"] in {"escalation", "authority_hook"}
+    ]
+    assert founder_notifications == []
+    assert thread_projections == []
+    assert db.execute("SELECT COUNT(*) FROM manager_supersessions").fetchone()[0] == 0
+
+
 @pytest.mark.parametrize("enqueue_fails", [False, True], ids=["enqueue", "recovery"])
 def test_completion_consumer_supersedes_and_leaves_successor_recoverable(
     runtime, db, monkeypatch, enqueue_fails: bool,
