@@ -6,6 +6,7 @@ import json
 import os
 import stat
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 from typing import Mapping
 
@@ -36,17 +37,110 @@ class Accounting:
     inodes: int
 
 
+class EvidencePlatform(StrEnum):
+    LINUX = "linux"
+    DARWIN = "darwin"
+
+
+class ZombieRecoveryState(StrEnum):
+    CLEAR = "clear"
+    PENDING = "pending"
+    AMBIGUOUS = "ambiguous"
+
+
+@dataclass(frozen=True)
+class LifecycleEvidence:
+    """Bounded projection of existing task/revisit/zombie/job authority."""
+
+    task_status: str
+    terminal_fingerprint: str
+    terminal_observed_at_ns: int
+    nonterminal_revisits: int = 0
+    zombie_recovery: ZombieRecoveryState = ZombieRecoveryState.CLEAR
+    pending_recovery_consumers: int = 0
+    active_jobs: int = 0
+    active_chain_members: int = 0
+    complete: bool = True
+
+    def validate(self) -> None:
+        counts = (self.nonterminal_revisits, self.pending_recovery_consumers,
+                  self.active_jobs, self.active_chain_members)
+        if (not self.complete or self.task_status not in {"completed", "failed", "cancelled"}
+                or not self.terminal_fingerprint or self.terminal_observed_at_ns < 0
+                or any(not isinstance(value, int) or value < 0 for value in counts)
+                or self.nonterminal_revisits or self.zombie_recovery is not ZombieRecoveryState.CLEAR
+                or self.pending_recovery_consumers or self.active_jobs or self.active_chain_members):
+            raise ReclamationError("authoritative lifecycle evidence is ineligible")
+
+
+@dataclass(frozen=True)
+class LivenessEvidence:
+    """Action-time complete process/session reference census."""
+
+    receipt: str
+    platform: EvidencePlatform
+    boot_id: str
+    observed_boot_id: str
+    complete: bool = True
+    truncated: bool = False
+    ambiguous: bool = False
+    permission_denied: bool = False
+    live_sessions: int = 0
+    process_roots: int = 0
+    process_cwds: int = 0
+    open_fds: int = 0
+
+    def validate(self) -> None:
+        counts = (self.live_sessions, self.process_roots, self.process_cwds, self.open_fds)
+        if (not self.receipt or not isinstance(self.platform, EvidencePlatform)
+                or not self.boot_id or self.boot_id != self.observed_boot_id
+                or any(not isinstance(value, int) or value < 0 for value in counts)
+                or not self.complete or self.truncated or self.ambiguous or self.permission_denied
+                or self.live_sessions or self.process_roots or self.process_cwds or self.open_fds):
+            raise ReclamationError("authoritative liveness evidence is ineligible")
+
+
+@dataclass(frozen=True)
+class CoverageEvidence:
+    """Current-boot bounded dominant-consumer classification receipt."""
+
+    receipt: str
+    digest: str
+    boot_id: str
+    observed_boot_id: str
+    complete: bool = True
+    truncated: bool = False
+    ambiguous: bool = False
+    unavailable: bool = False
+    dominant_unclassified: int = 0
+    dominant_durable: int = 0
+    dominant_recovery: int = 0
+
+    def validate(self) -> None:
+        counts = (self.dominant_unclassified, self.dominant_durable, self.dominant_recovery)
+        if (not self.receipt or len(self.digest) != 64 or not self.boot_id
+                or any(not isinstance(value, int) or value < 0 for value in counts)
+                or self.boot_id != self.observed_boot_id or not self.complete or self.truncated
+                or self.ambiguous or self.unavailable or self.dominant_unclassified
+                or self.dominant_durable or self.dominant_recovery):
+            raise ReclamationError("current-boot coverage evidence is ineligible")
+
+
 @dataclass(frozen=True)
 class AuthorityEvidence:
     agent_name: str
-    terminal_fingerprint: str
-    terminal_observed_at_ns: int
-    lifecycle_clear: bool
-    liveness_receipt: str
-    liveness_complete: bool
-    coverage_receipt: str
-    coverage_digest: str
-    coverage_permits_deletion: bool
+    lifecycle: LifecycleEvidence
+    liveness: LivenessEvidence
+    coverage: CoverageEvidence
+
+    def validate(self) -> None:
+        if not self.agent_name:
+            raise ReclamationError("agent identity unavailable")
+        self.lifecycle.validate()
+        self.liveness.validate()
+        self.coverage.validate()
+        if self.liveness.boot_id != self.coverage.boot_id:
+            raise ReclamationError("evidence boot mismatch")
 
 
 @dataclass(frozen=True)
@@ -146,10 +240,9 @@ def _census(root: Path) -> tuple[tuple[FileIdentity, ...], Accounting]:
 def seal_ledger_row(*, workspace: Path, task_id: str, evidence: AuthorityEvidence,
                     now_ns: int, mtime_floor_ns: int = MTIME_FLOOR_NS) -> LedgerRow:
     """Re-derive a canonical row at action time; never trust manifest paths."""
-    if not evidence.lifecycle_clear or not evidence.liveness_complete:
-        raise ReclamationError("authoritative lifecycle or liveness evidence is incomplete")
-    if not evidence.coverage_permits_deletion:
-        raise ReclamationError("current-boot coverage does not permit deletion")
+    evidence.validate()
+    if now_ns < evidence.lifecycle.terminal_observed_at_ns:
+        raise ReclamationError("terminal evidence is from the future")
     try:
         workspace = Path(workspace).resolve(strict=True)
     except OSError as exc:
@@ -183,10 +276,10 @@ def seal_ledger_row(*, workspace: Path, task_id: str, evidence: AuthorityEvidenc
     entries, before = _census(root)
     if any(item.device != root_info.st_dev for item in entries):
         raise ReclamationError("cross-device entry")
-    if any(Path(item.relative_path).name == ".git" for item in entries if item.relative_path):
+    if _has_repository_evidence(root, workspace):
         raise ReclamationError("git or repository evidence")
     newest = max(item.mtime_ns for item in entries)
-    if newest > evidence.terminal_observed_at_ns or now_ns - newest < mtime_floor_ns:
+    if newest > evidence.lifecycle.terminal_observed_at_ns or now_ns - newest < mtime_floor_ns:
         raise ReclamationError("mtime floor not met")
     siblings = tuple(sorted((_identity(Path(item.path)) for item in os.scandir(parent)
                              if item.name != task_id), key=lambda item: item.path))
@@ -196,15 +289,50 @@ def seal_ledger_row(*, workspace: Path, task_id: str, evidence: AuthorityEvidenc
     payload: Mapping[str, object] = {
         "task_id": task_id, "agent": evidence.agent_name, "root": str(root),
         "manifest_digest": manifest_digest, "device": root_info.st_dev, "inode": root_info.st_ino,
-        "terminal": evidence.terminal_fingerprint, "liveness": evidence.liveness_receipt,
-        "coverage": evidence.coverage_receipt, "coverage_digest": evidence.coverage_digest,
+        "terminal": evidence.lifecycle.terminal_fingerprint, "liveness": evidence.liveness.receipt,
+        "coverage": evidence.coverage.receipt, "coverage_digest": evidence.coverage.digest,
         "entries": [x.__dict__ for x in entries], "protected": [x.__dict__ for x in protected],
     }
     fingerprint = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     return LedgerRow(task_id, evidence.agent_name, str(root), str(manifest), str(lock), manifest_digest,
-                     root_info.st_dev, root_info.st_ino, newest, evidence.terminal_fingerprint,
-                     evidence.liveness_receipt, evidence.coverage_receipt, evidence.coverage_digest,
+                     root_info.st_dev, root_info.st_ino, newest, evidence.lifecycle.terminal_fingerprint,
+                     evidence.liveness.receipt, evidence.coverage.receipt, evidence.coverage.digest,
                      entries, before, protected, fingerprint)
+
+
+def _has_repository_evidence(root: Path, workspace: Path) -> bool:
+    """Recognize ordinary, linked-worktree, and bare Git repositories without following links."""
+    def signature(path: Path) -> bool:
+        try:
+            git = path / ".git"
+            if git.exists(follow_symlinks=False):
+                return True
+            head = path / "HEAD"
+            objects = path / "objects"
+            refs = path / "refs"
+            head_info = head.stat(follow_symlinks=False)
+            return (stat.S_ISREG(head_info.st_mode)
+                    and stat.S_ISDIR(objects.stat(follow_symlinks=False).st_mode)
+                    and stat.S_ISDIR(refs.stat(follow_symlinks=False).st_mode))
+        except OSError:
+            return False
+
+    cursor = root
+    while True:
+        if signature(cursor):
+            return True
+        if cursor == workspace:
+            break
+        if workspace not in cursor.parents:
+            raise ReclamationError("repository ancestor classification escaped workspace")
+        cursor = cursor.parent
+    for path, directories, _files in os.walk(root, topdown=True, followlinks=False):
+        candidate = Path(path)
+        if signature(candidate):
+            return True
+        directories[:] = [name for name in directories
+                           if not (candidate / name).is_symlink()]
+    return False
 
 
 def _verify_ledger_identity(row: LedgerRow) -> None:
@@ -233,6 +361,20 @@ def _verify_protected(row: LedgerRow) -> None:
     for expected in row.protected:
         if _identity(Path(expected.path), digest=expected.digest is not None) != expected:
             raise ReclamationError("protected path changed")
+
+
+def _verify_parent_entries(row: LedgerRow, parent_fd: int, *, root_absent: bool) -> None:
+    expected = {Path(item.path).name: item for item in row.protected[6:]}
+    names = set(os.listdir(parent_fd))
+    required = set(expected)
+    if not root_absent:
+        required.add(row.task_id)
+    if names != required:
+        raise ReclamationError("protected parent directory entries changed")
+    for name, identity in expected.items():
+        info = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        if (info.st_dev, info.st_ino) != (identity.device, identity.inode):
+            raise ReclamationError("protected sibling changed")
 
 
 def _remove_dir(fd: int, expected: Mapping[str, FileIdentity], prefix: str, device: int) -> None:
@@ -276,15 +418,28 @@ def execute_ledger(rows: tuple[LedgerRow, ...]) -> tuple[ReclamationResult, ...]
             if current != row.entries or accounting != row.before:
                 raise ReclamationError("ledger changed after finalization")
             _verify_protected(row)
-            fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            parent_fd = os.open(root.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
             try:
-                info = os.fstat(fd)
-                if (info.st_dev, info.st_ino) != (row.root_device, row.root_inode):
-                    raise ReclamationError("literal root changed")
-                _remove_dir(fd, {x.relative_path: x for x in row.entries if x.relative_path}, "", row.root_device)
+                _verify_parent_entries(row, parent_fd, root_absent=False)
+                fd = os.open(row.task_id, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                             dir_fd=parent_fd)
+                try:
+                    info = os.fstat(fd)
+                    if (info.st_dev, info.st_ino) != (row.root_device, row.root_inode):
+                        raise ReclamationError("literal root changed")
+                    _remove_dir(fd, {x.relative_path: x for x in row.entries if x.relative_path}, "",
+                                row.root_device)
+                    linked = os.stat(row.task_id, dir_fd=parent_fd, follow_symlinks=False)
+                    if (linked.st_dev, linked.st_ino) != (row.root_device, row.root_inode):
+                        raise ReclamationError("literal root directory entry changed")
+                    os.rmdir(row.task_id, dir_fd=parent_fd)
+                    if os.fstat(fd).st_nlink != 0:
+                        raise ReclamationError("sealed root inode survived final removal")
+                finally:
+                    os.close(fd)
+                _verify_parent_entries(row, parent_fd, root_absent=True)
             finally:
-                os.close(fd)
-            os.rmdir(root)
+                os.close(parent_fd)
             _verify_protected(row)
             results.append(ReclamationResult(row.task_id, "completed", None, row.before,
                                               Accounting(0, 0, 0), row.before.allocated_bytes,

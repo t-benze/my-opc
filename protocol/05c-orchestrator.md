@@ -1332,8 +1332,12 @@ only by tests. Its executor accepts immutable finalized ledger rows rather than
 manifest paths or candidate lists, and performs literal-root fd-relative
 no-follow same-device removal with exact allocated-byte/inode accounting and
 protected parent/manifest/lock/sibling postconditions. Sealing requires explicit
-complete lifecycle/liveness/current-boot coverage receipts and the 60-second
-newest-mtime floor. B1 adds no teardown/scheduler caller, activation, deployment,
+bounded typed lifecycle/liveness/current-boot coverage evidence that rejects
+missing, stale-boot, truncated, ambiguous, unsupported-platform, recovery/job/live-
+reference, or unavailable authority and the 60-second newest-mtime floor. Final
+removal is bound to verified parent/root identity and complete sibling/directory-
+entry postconditions; Git/worktree/bare-repository ancestor or descendant evidence
+fails closed. B1 adds no teardown/scheduler caller, activation, deployment,
 live deletion, or legacy-backlog eligibility.
 
 1. **Measures** the OWNING AGENT's workspace with an explicit bounded,

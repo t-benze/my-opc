@@ -1325,9 +1325,12 @@ Small atomic daemon callback payloads retain their explicit ``/tmp`` contracts.
 
 THR-195 B1 adds a dormant, production-unreferenced engine whose executor
 accepts only immutable final ledger rows derived from canonical manifests plus
-explicit complete lifecycle, liveness, 60-second newest-mtime, and current-boot
-coverage evidence. It uses fd-relative no-follow same-device removal, exact
-allocated-byte/inode accounting, and manifest/lock/parent/sibling postconditions.
+bounded typed lifecycle, liveness, 60-second newest-mtime, and current-boot
+coverage evidence that cannot make incomplete, stale-boot, truncated, ambiguous,
+unsupported-platform, recovery/job/live-reference, or unavailable authority
+eligible. It rejects Git/worktree/bare-repository ancestor or descendant evidence
+and binds fd-relative no-follow same-device final removal to verified parent/root
+identity plus complete directory-entry/sibling postconditions and exact accounting.
 No production path imports it; teardown/scheduler wiring, activation, live
 deletion, deployment, and legacy backlog eligibility remain absent.
 Runtime-launched task-agent and job subprocesses instead receive one canonical
