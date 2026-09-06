@@ -66,11 +66,43 @@ tailwind = re.compile(rf"(?<![\w-])(?:[a-z][\w-]*:)*!?-?[a-z][\w-]*-\[({hex_valu
 css_or_object = re.compile(rf"(?:^|[;{{,])\s*(?:--[\w-]+|[\w-]*(?:color|background|border|fill|stroke|shadow|outline|decoration|accent|caret)[\w-]*)\s*:\s*['\"]?({hex_value})(?![0-9a-fA-F])", re.IGNORECASE)
 jsx_attribute = re.compile(rf"\b(?:color|fill|stroke)\s*=\s*(?:['\"]|{{\s*['\"])({hex_value})(?![0-9a-fA-F])", re.IGNORECASE)
 jsx_colour_attribute = re.compile(r"\b(?:color|fill|stroke)\s*=\s*(?:['\"]|\{\s*['\"])([^'\"}\n]+)", re.IGNORECASE)
-default_tailwind = re.compile(rf"(?<![\w-])(?:[a-z][\w-]*:)*!?-?({colour_utilities}-(?:(?:{palette})-\d{{2,3}}|black|white)(?:/\d{{1,3}})?)(?![\w-])", re.IGNORECASE)
+palette_scale = r"(?:50|[1-9]00|950)"
+special_colour = r"(?:black|white|transparent|current|inherit)"
+default_tailwind = re.compile(rf"(?<![\w-])(?:[a-z][\w-]*:)*!?-?({colour_utilities}-(?:(?:{palette})-{palette_scale}|{special_colour})(?:/\d{{1,3}})?)(?![\w-])", re.IGNORECASE)
 arbitrary_tailwind = re.compile(rf"(?<![\w-])(?:[a-z][\w-]*:)*!?-?{colour_utilities}-\[([^\]\n]+)\]", re.IGNORECASE)
 declaration = re.compile(rf"(?:^|[;{{,])\s*(?:--[\w-]+|[\w-]*{colour_properties}[\w-]*)\s*:\s*([^;}}\n]+)", re.IGNORECASE)
-colour_function = re.compile(r"(?:rgb|rgba|hsl|hsla|oklch|oklab|color)\([^()]*\)", re.IGNORECASE)
-word = re.compile(r"(?<![\w-])[a-z]+(?![\w-])", re.IGNORECASE)
+colour_function_start = re.compile(r"(?<![\w-])(?:rgb|rgba|hsl|hsla|oklch|oklab|color)\(", re.IGNORECASE)
+
+def colour_functions(value: str) -> list[tuple[int, str]]:
+    """Return balanced supported colour functions, including nested var()."""
+    found: list[tuple[int, str]] = []
+    cursor = 0
+    while match := colour_function_start.search(value, cursor):
+        depth = 1
+        end = match.end()
+        while end < len(value) and depth:
+            if value[end] == "(":
+                depth += 1
+            elif value[end] == ")":
+                depth -= 1
+            end += 1
+        if depth:
+            cursor = match.end()
+            continue
+        found.append((match.start(), value[match.start():end].lower()))
+        cursor = end
+    return found
+
+def complete_named_colour(value: str) -> tuple[int, str] | None:
+    leading = len(value) - len(value.lstrip())
+    candidate = value.strip()
+    if (len(candidate) >= 2 and candidate[0] == candidate[-1] and candidate[0] in "'\""):
+        candidate = candidate[1:-1].strip()
+        leading += 1
+    important = re.fullmatch(r"([a-z]+)(?:\s*!important)?", candidate, re.IGNORECASE)
+    if important and important.group(1).lower() in named_colours:
+        return leading, important.group(1).lower()
+    return None
 
 def non_hex_value_matches(contents: str) -> list[tuple[int, str]]:
     found: list[tuple[int, str]] = []
@@ -80,27 +112,28 @@ def non_hex_value_matches(contents: str) -> list[tuple[int, str]]:
         value = match.group(1)
         lowered = value.lower()
         normalized = lowered.replace("_", " ")
-        functions = list(colour_function.finditer(normalized))
+        functions = colour_functions(normalized)
         if functions:
-            for function in functions:
-                found.append((match.start(1) + function.start(), lowered[function.start():function.end()]))
+            for start, function in functions:
+                found.append((match.start(1) + start, function.replace(" ", "_")))
         elif lowered in named_colours:
             found.append((match.start(1), lowered))
     for match in declaration.finditer(contents):
         value = match.group(1)
         base = match.start(1)
-        for function in colour_function.finditer(value):
-            found.append((base + function.start(), function.group(0).lower()))
-        for candidate in word.finditer(value):
-            if candidate.group(0).lower() in named_colours:
-                found.append((base + candidate.start(), candidate.group(0).lower()))
+        for start, function in colour_functions(value):
+            found.append((base + start, function))
+        if named := complete_named_colour(value):
+            start, candidate = named
+            found.append((base + start, candidate))
     for match in jsx_colour_attribute.finditer(contents):
         value = match.group(1)
         base = match.start(1)
-        for function in colour_function.finditer(value):
-            found.append((base + function.start(), function.group(0).lower()))
-        if value.lower() in named_colours:
-            found.append((base, value.lower()))
+        for start, function in colour_functions(value):
+            found.append((base + start, function))
+        if named := complete_named_colour(value):
+            start, candidate = named
+            found.append((base + start, candidate))
     return found
 
 def is_production_file(path: Path) -> bool:

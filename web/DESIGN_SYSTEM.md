@@ -12,9 +12,12 @@ Feature compositions keep using the stable `@/design-system/...` import paths.
   backgrounds; it is intentionally distinct from the generic UI accent.
   Components and stories consume semantic utilities. The deterministic
   full-production-tree check in `scripts/verify-design-system.sh` rejects raw
-  hex, default Tailwind palette utilities, arbitrary Tailwind colour values,
+  hex, actual default Tailwind palette scales and special colour utilities,
+  arbitrary Tailwind colour values,
   CSS `rgb()`/`rgba()`/`hsl()`/`hsla()`/`oklch()`/`oklab()`/`color()` values,
-  and named CSS colours outside that authority. It recognizes only
+  and complete named CSS colour values outside that authority. Supported
+  colour functions are balanced and may contain nested channel functions such
+  as `var()`. It recognizes only
   colour-capable utilities, properties, and JSX attributes, so issue references,
   entities, non-colour arbitrary utilities, and token utilities are not hits.
   The exact path/line/column/value/reason baseline is shrinking: moving,

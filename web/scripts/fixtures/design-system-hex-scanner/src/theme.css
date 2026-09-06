@@ -9,3 +9,11 @@
   color: var(--text-primary);
   color: var(--red);
 }
+
+.balanced {
+  color: rgb(var(--raw-rgb));
+  background-color: hsl(var(--raw-hsl) / 50%);
+  background-image: url(/assets/red.png);
+  width: red;
+  color: var(--semantic-token);
+}

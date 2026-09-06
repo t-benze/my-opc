@@ -17,7 +17,7 @@ cp -R "$fixture/src" "$scratch/src"
 cp "$fixture/allowlist.tsv" "$scratch/allowlist.tsv"
 
 receipt=$(run_scan "$scratch/src" "$scratch/allowlist.tsv")
-grep -F 'Colour scan receipt: denominator=2 production files; hits=22; files=2' <<<"$receipt"
+grep -F 'Colour scan receipt: denominator=2 production files; hits=29; files=2' <<<"$receipt"
 grep -F 'Colour scan files: App.tsx, theme.css' <<<"$receipt"
 
 cp -R "$fixture/src" "$scratch/relocated-src"
@@ -81,7 +81,7 @@ grep -F 'stale allowlist entry: App.tsx' "$scratch/changed.out"
 
 cp "$fixture/src/App.tsx" "$scratch/src/App.tsx"
 cp "$fixture/allowlist.tsv" "$scratch/allowlist.tsv"
-sed 's/#010203/currentColor/' "$scratch/src/App.tsx" > "$scratch/App.next"
+sed 's/#010203/none   /' "$scratch/src/App.tsx" > "$scratch/App.next"
 mv "$scratch/App.next" "$scratch/src/App.tsx"
 if run_scan "$scratch/src" "$scratch/allowlist.tsv" >"$scratch/stale.out" 2>&1; then
   echo 'expected a deleted legacy hit to make its allowlist row stale' >&2

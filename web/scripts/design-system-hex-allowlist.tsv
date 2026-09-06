@@ -15,3 +15,45 @@ features/todos/strings.ts	78	21	#575249	Todos inactive-status text residue prese
 features/todos/strings.ts	78	34	#efece2	Todos inactive-status background residue preserved for the later approved Todos unit
 features/work-hours-config/OverviewPage.tsx	123	65	bg-white	Existing progress-label foreground utility frozen pending a separately reviewed semantic-token migration
 features/work-hours-config/TierEditorDialog.tsx	400	69	bg-white	Existing slider-label foreground utility frozen pending a separately reviewed semantic-token migration
+design-system/patterns/CommandPalette.tsx	172	66	bg-transparent	legacy default Tailwind special colour utility
+design-system/patterns/Composer.tsx	238	97	bg-transparent	legacy default Tailwind special colour utility
+design-system/patterns/MessageBubble.tsx	64	170	bg-transparent	legacy default Tailwind special colour utility
+design-system/patterns/Sparkline.tsx	55	24	stroke-current	legacy default Tailwind special colour utility
+design-system/patterns/StatusBadge.tsx	88	64	bg-current	legacy default Tailwind special colour utility
+design-system/patterns/TypingBubble.tsx	86	57	bg-current	legacy default Tailwind special colour utility
+design-system/patterns/semanticTone.ts	33	63	bg-transparent	legacy default Tailwind special colour utility
+design-system/primitives/Button.tsx	29	47	border-transparent	legacy default Tailwind special colour utility
+design-system/primitives/Button.tsx	31	55	border-transparent	legacy default Tailwind special colour utility
+design-system/primitives/Button.tsx	39	12	bg-transparent	legacy default Tailwind special colour utility
+design-system/primitives/Button.tsx	39	47	border-transparent	legacy default Tailwind special colour utility
+design-system/primitives/Button.tsx	41	25	border-transparent	legacy default Tailwind special colour utility
+design-system/primitives/Button.tsx	41	44	bg-transparent	legacy default Tailwind special colour utility
+design-system/primitives/Input.tsx	20	309	bg-transparent	legacy default Tailwind special colour utility
+design-system/primitives/SubTabBar.tsx	41	34	border-transparent	legacy default Tailwind special colour utility
+design-system/primitives/Tabs.tsx	70	150	border-transparent	legacy default Tailwind special colour utility
+features/agents/AgentsPage.tsx	191	80	border-transparent	legacy default Tailwind special colour utility
+features/audit/AuditPage.tsx	191	63	border-transparent	legacy default Tailwind special colour utility
+features/health/HealthPage.tsx	526	34	border-transparent	legacy default Tailwind special colour utility
+features/jobs/JobDetailPage.tsx	272	72	bg-current	legacy default Tailwind special colour utility
+features/jobs/JobDetailPane.tsx	22	44	bg-transparent	legacy default Tailwind special colour utility
+features/jobs/JobDetailPane.tsx	24	43	bg-transparent	legacy default Tailwind special colour utility
+features/kb/KbPage.tsx	149	12	border-transparent	legacy default Tailwind special colour utility
+features/onboarding/OnboardingPage.tsx	278	67	border-current	legacy default Tailwind special colour utility
+features/settings/sections/CustomProfilesSection.tsx	79	64	bg-transparent	legacy default Tailwind special colour utility
+features/settings/sections/CustomProfilesSection.tsx	84	62	bg-current	legacy default Tailwind special colour utility
+features/settings/sections/ExecutorBinariesSection.tsx	52	68	bg-transparent	legacy default Tailwind special colour utility
+features/settings/sections/ExecutorBinariesSection.tsx	69	64	bg-current	legacy default Tailwind special colour utility
+features/skills/SkillAssignmentPanel.tsx	63	56	bg-transparent	legacy default Tailwind special colour utility
+features/skills/SkillDetailPage.tsx	61	56	bg-transparent	legacy default Tailwind special colour utility
+features/skills/SkillStatusBadge.tsx	16	56	bg-transparent	legacy default Tailwind special colour utility
+features/skills/SkillValidationPage.tsx	55	56	bg-transparent	legacy default Tailwind special colour utility
+features/skills/SkillsPage.tsx	96	56	border-transparent	legacy default Tailwind special colour utility
+features/system-assistant/ConversationSwitcher.tsx	161	57	bg-transparent	legacy default Tailwind special colour utility
+features/tasks/TaskListRow.tsx	112	62	bg-current	legacy default Tailwind special colour utility
+features/tasks/TasksPage.tsx	105	64	bg-current	legacy default Tailwind special colour utility
+features/threads/ThreadsPage.tsx	1260	91	bg-current	legacy default Tailwind special colour utility
+features/todos/components/StatusPill.tsx	27	60	bg-current	legacy default Tailwind special colour utility
+features/usage/UsagePage.tsx	735	57	border-transparent	legacy default Tailwind special colour utility
+features/usage/UsagePage.tsx	736	65	border-transparent	legacy default Tailwind special colour utility
+features/usage/UsagePage.tsx	767	57	border-transparent	legacy default Tailwind special colour utility
+features/usage/UsagePage.tsx	768	65	border-transparent	legacy default Tailwind special colour utility

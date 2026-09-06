@@ -13,3 +13,10 @@ export function App() {
     </main>
   )
 }
+
+export const scannerAdversarial = (
+  <div className="text-transparent bg-current border-inherit text-red-123 bg-blue-999">
+    <span style={{ color: 'rgb(var(--raw-rgb))', backgroundColor: 'hsl(var(--raw-hsl) / 50%)' }} />
+    <span style={{ backgroundImage: 'url(/assets/red.png)', width: 'red', color: 'var(--semantic)' }} />
+  </div>
+)
