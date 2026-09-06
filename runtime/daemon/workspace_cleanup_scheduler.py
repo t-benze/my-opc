@@ -3,10 +3,13 @@
 Founder ruling (THR-195 seq 129): workspace cleanup is a **daemon-managed,
 system-default capability** that runs on its own without user configuration and
 independent of all user Schedules. The daemon periodically measures each agent
-workspace and — when the owner's workspace total is at or above the founder
-threshold and the TASK-5552 / THR-195 contract says cleanup investigation is
-warranted — triggers an ordinary root task for that owning agent with the
-fresh measurement packed as advisory context at trigger time. It never uses,
+workspace. When measurement is available, only a numeric result below the
+1 GiB founder threshold skips. A bounded timeout, error, or cap/truncation
+result that makes measurement unavailable bypasses only numeric threshold
+evaluation; otherwise-due spawning continues with honest unavailable advisory
+context. The daemon triggers an ordinary root task for that owning agent when
+the remaining TASK-5552 / THR-195 contract says cleanup investigation is
+warranted. It never uses,
 creates, or modifies a Schedule, never injects anything into the shared
 session-prompt seam, and never performs cleanup itself.
 
@@ -19,8 +22,11 @@ forward.
 
 Founder-approved product defaults (TASK-6036, resolving the TASK-6029 stop
 analysis): daemon-managed system cleanup independent of user Schedules; weekly
-Sunday 03:30 in each org's timezone; measure per agent and trigger only when
-that agent's workspace total is >= 1 GiB; the first TWO triggered runs per
+Sunday 03:30 in each org's timezone; measure per agent; only an available
+numeric result below 1 GiB skips, while a bounded timeout, error, or
+cap/truncation result that is unavailable bypasses only numeric threshold
+evaluation and otherwise-due spawning continues with honest unavailable
+advisory context; the first TWO triggered runs per
 agent are strictly report-only; each triggered ordinary task is assigned to
 its owning agent; suppress while that agent has a non-terminal cleanup task
 and apply a seven-day per-agent cooldown; one durable founder-visible report
@@ -58,7 +64,10 @@ Contract-relevant bounds (all documented in protocol/05b + 05c):
 - Trigger: the weekly occurrence is due AND this window is unserviced for the
   agent AND no prior cleanup task of that agent is non-terminal (TASK-5552 §3
   "one run at a time") AND the agent's last cleanup task is older than the
-  seven-day per-agent cooldown AND the agent's workspace measures >= 1 GiB.
+  seven-day per-agent cooldown. Only an available numeric result below 1 GiB
+  skips; a bounded timeout, error, or cap/truncation result that is unavailable
+  bypasses only numeric threshold evaluation, and otherwise-due spawning
+  continues with honest unavailable advisory context.
 - Report-only rollout: the first TWO triggered runs per agent are STRICTLY
   report-only (daemon-composed REPORT-ONLY brief — inventory and nothing
   else). From the third triggered run onward the daemon composes the approved
