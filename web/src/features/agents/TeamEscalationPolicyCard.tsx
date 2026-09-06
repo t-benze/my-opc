@@ -27,7 +27,13 @@ export function TeamEscalationPolicyEntryCard({ agent }: { agent: { name: string
   );
 }
 
-export function TeamEscalationPolicyCard({ agent }: { agent: { name: string; team: string; role: string } }): JSX.Element {
+export function TeamEscalationPolicyCard({
+  agent,
+  onDirtyChange,
+}: {
+  agent: { name: string; team: string; role: string };
+  onDirtyChange?: (dirty: boolean) => void;
+}): JSX.Element {
   const query = useTeamEscalationPolicy(agent);
   const createRelease = useCreateTeamEscalationPolicyRelease();
   const activateRelease = useActivateTeamEscalationPolicyRelease();
@@ -56,6 +62,9 @@ export function TeamEscalationPolicyCard({ agent }: { agent: { name: string; tea
   }, [source]);
 
   const dirty = draft ? JSON.stringify(draft) !== baseline : false;
+  useEffect(() => {
+    onDirtyChange?.(dirty);
+  }, [dirty, onDirtyChange]);
   useEffect(() => {
     if (!dirty) return;
     const warn = (event: BeforeUnloadEvent) => event.preventDefault();
