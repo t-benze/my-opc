@@ -34,6 +34,10 @@ DENIAL_OPERATIONS = (
 DENIAL_RESULTS = {"allow", "deny", "unknown"}
 DENIAL_CATEGORIES = {"none", "permission_denied", "unavailable", "timeout", "operational_error"}
 DENIAL_ERRNOS = {None, "EACCES", "EPERM", "ENOENT", "ENODEV", "EAFNOSUPPORT", "ETIMEDOUT", "ECONNREFUSED", "EIO", "OTHER"}
+CANDIDATE_FAILURE_PHASES = {
+    "pre_ready", "ready", "expected_peers", "listener", "denial_matrix",
+    "assertion", "cleanup",
+}
 PHASES = {
     "startup": ("process_absent", "tsnet_admission_absent", "connector_staged_credential_service_readable_non_writable", "sidecar_staged_credential_service_readable_non_writable", "credential_source_retired", "credential_dropin_retired", "composite_ready_after_sidecar", "missing_consumed_state_failed_closed"),
     "admission": ("tsnet_admission_reachable",),
@@ -161,6 +165,45 @@ def validate_denial_matrix(doc: dict, *, expected_arm: str | None = None) -> Non
         assert not any(marker in rendered for marker in SECRET_MARKERS)
 
 
+def validate_candidate_terminal(doc: dict, *, expected_arm: str | None = None) -> None:
+    assert set(doc) == {
+        "schema", "version", "arm_id", "phase", "invocation_binding",
+        "terminal_evidence", "denial_matrix",
+    }
+    assert doc["schema"] == "happyranch.n3.candidate-terminal-evidence" and doc["version"] == 1
+    candidate_arms = {item[0] for item in ARM_SPECS if item[2] == "candidate"}
+    assert doc["arm_id"] in candidate_arms
+    if expected_arm is not None:
+        assert doc["arm_id"] == expected_arm
+    assert doc["phase"] in CANDIDATE_FAILURE_PHASES
+    assert doc["invocation_binding"] == "settled_current"
+    terminal = doc["terminal_evidence"]
+    assert isinstance(terminal, dict) and set(terminal) == {"pinned_invocation", "systemd", "window"}
+    categories = set(DIAGNOSTIC_PHASES)
+    for scope in ("pinned_invocation", "window"):
+        summary = terminal[scope]
+        expected_keys = {"categories", "category_counts", "receipt_count"}
+        if scope == "pinned_invocation":
+            expected_keys |= {"qualifying_receipt_count", "cardinality"}
+        assert set(summary) == expected_keys
+        counts = summary["category_counts"]
+        assert isinstance(counts, dict) and set(counts) == categories
+        assert all(type(value) is int and value >= 0 for value in counts.values())
+        assert summary["receipt_count"] == sum(counts.values())
+        assert summary["categories"] == sorted(key for key, value in counts.items() if value)
+    pinned = terminal["pinned_invocation"]
+    assert pinned["qualifying_receipt_count"] == pinned["receipt_count"]
+    expected_cardinality = "zero" if pinned["receipt_count"] == 0 else "one" if pinned["receipt_count"] == 1 else "multiple"
+    assert pinned["cardinality"] == expected_cardinality
+    systemd = terminal["systemd"]
+    assert set(systemd) == {"result", "exec_main_status"}
+    assert systemd["result"] in {"success", "resources", "timeout", "exit-code", "signal", "core-dump", "watchdog", "start-limit-hit", "protocol"}
+    assert type(systemd["exec_main_status"]) is int and 0 <= systemd["exec_main_status"] <= 255
+    validate_denial_matrix(doc["denial_matrix"], expected_arm=doc["arm_id"])
+    rendered = json.dumps(doc, sort_keys=True).lower()
+    assert not any(marker in rendered for marker in SECRET_MARKERS)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
@@ -186,6 +229,8 @@ def main() -> None:
     check.add_argument("--expected-subject"); check.add_argument("--expected-run")
     denial = sub.add_parser("validate-denial-matrix"); denial.add_argument("path", type=Path)
     denial.add_argument("--expected-arm", required=True)
+    candidate_terminal = sub.add_parser("validate-candidate-terminal")
+    candidate_terminal.add_argument("path", type=Path); candidate_terminal.add_argument("--expected-arm", required=True)
     args = parser.parse_args()
     if args.command == "init":
         doc = {"schema": SCHEMA, "version": VERSION,
@@ -233,8 +278,10 @@ def main() -> None:
         args.path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
     elif args.command == "validate":
         validate(_load(args.path), expected_subject=args.expected_subject, expected_run=args.expected_run)
-    else:
+    elif args.command == "validate-denial-matrix":
         validate_denial_matrix(_load(args.path), expected_arm=args.expected_arm)
+    else:
+        validate_candidate_terminal(_load(args.path), expected_arm=args.expected_arm)
 
 
 if __name__ == "__main__":

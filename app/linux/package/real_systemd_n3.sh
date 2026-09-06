@@ -8,7 +8,16 @@ TAILSCALE_VERSION=1.102.3
 TAILSCALE_SHA256=36ddd9b51be57ffc2990cf76323cfa13643bfbb1b8a969f6183fa164741cdef5
 readonly HEADSCALE_VERSION HEADSCALE_SHA256 TAILSCALE_VERSION TAILSCALE_SHA256
 
-fail() { echo "n3-real-systemd: $1" >&2; exit 1; }
+current_acceptance_arm=""; current_acceptance_variant=""; candidate_failure_phase=""
+candidate_failure_preserved=0; candidate_failure_preserving=0; arm_journal_cursor=""
+fail() {
+  local message="$1"
+  if [[ "$current_acceptance_variant" == candidate && "$candidate_failure_preserved" == 0 && "$candidate_failure_preserving" == 0 ]] && declare -F preserve_candidate_failure >/dev/null; then
+    preserve_candidate_failure || echo "n3-real-systemd: candidate terminal evidence preservation failed" >&2
+  fi
+  echo "n3-real-systemd: $message" >&2
+  exit 1
+}
 wait_for() {
   local label="$1"; shift
   for _attempt in $(seq 1 60); do "$@" && return 0; sleep 1; done
@@ -62,10 +71,10 @@ settle_control_terminal_invocation() {
   printf '%s\t%s\t%s\n' "$invocation" "$result" "$exec_main_status"
 }
 current_control_terminal_evidence() {
-  local cursor="$1" invocation_id="$2" result="$3" exec_main_status="$4"
+  local cursor="$1" invocation_id="$2" result="$3" exec_main_status="$4" qualifying_mode="${5:-engine_start}"
   sudo journalctl --after-cursor="$cursor" -o json --output-fields=MESSAGE,_SYSTEMD_INVOCATION_ID --no-pager | python -c '
 import json, sys
-invocation, result, exec_main_status = sys.argv[1:]
+invocation, result, exec_main_status, qualifying_mode = sys.argv[1:]
 if len(invocation) != 32 or any(c not in "0123456789abcdef" for c in invocation):
     raise SystemExit(1)
 if result not in {"success", "resources", "timeout", "exit-code", "signal", "core-dump", "watchdog", "start-limit-hit", "protocol"}:
@@ -106,15 +115,18 @@ def summary(scope):
         "receipt_count": sum(values.values()),
     }
 pinned = summary("pinned")
-pinned["qualifying_receipt_count"] = counts["pinned"]["engine_start"]
+pinned["qualifying_receipt_count"] = pinned["receipt_count"] if qualifying_mode == "all" else counts["pinned"]["engine_start"]
+pinned["cardinality"] = "zero" if pinned["receipt_count"] == 0 else "one" if pinned["receipt_count"] == 1 else "multiple"
 output = {
     "pinned_invocation": pinned,
     "systemd": {"result": result, "exec_main_status": int(exec_main_status)},
     "window": summary("window"),
 }
 print(json.dumps(output, sort_keys=True, separators=(",", ":")))
-' "$invocation_id" "$result" "$exec_main_status"
+' "$invocation_id" "$result" "$exec_main_status" "$qualifying_mode"
 }
+settle_terminal_invocation() { settle_control_terminal_invocation; }
+current_terminal_evidence() { current_control_terminal_evidence "$@"; }
 control_terminal_evidence_qualifies() {
   python -c 'import json,sys; d=json.load(sys.stdin); p=d["pinned_invocation"]; assert p["qualifying_receipt_count"] == p["receipt_count"] == 1; assert p["categories"] == ["engine_start"]'
 }
@@ -381,6 +393,29 @@ json.dump({"schema":"happyranch.n3.sandbox-denial-matrix","version":1,
 PY
   python "$evidence_driver" validate-denial-matrix "$diagnostics/$arm_id-denial-matrix.json" --expected-arm "$arm_id"
 }
+preserve_candidate_failure() {
+  candidate_failure_preserving=1
+  local denial_path="$diagnostics/$current_acceptance_arm-denial-matrix.json"
+  local terminal_path="$diagnostics/$current_acceptance_arm-candidate-terminal-evidence.json"
+  [[ -n "$current_acceptance_arm" && -n "$candidate_failure_phase" && -n "$arm_journal_cursor" ]] || return 1
+  if [[ ! -f "$denial_path" ]]; then
+    capture_denial_matrix "$current_acceptance_arm" || { candidate_failure_phase=denial_matrix; return 1; }
+  fi
+  local invocation_id systemd_result exec_main_status terminal_evidence
+  IFS=$'\t' read -r invocation_id systemd_result exec_main_status < <(settle_terminal_invocation) || return 1
+  terminal_evidence="$(current_terminal_evidence "$arm_journal_cursor" "$invocation_id" "$systemd_result" "$exec_main_status" all)" || return 1
+  python - "$current_acceptance_arm" "$candidate_failure_phase" "$terminal_evidence" "$denial_path" "$terminal_path" <<'PY'
+import json, pathlib, sys
+arm, phase, terminal, denial_path, output_path = sys.argv[1:]
+doc = {"schema":"happyranch.n3.candidate-terminal-evidence","version":1,
+       "arm_id":arm,"phase":phase,"invocation_binding":"settled_current",
+       "terminal_evidence":json.loads(terminal),
+       "denial_matrix":json.loads(pathlib.Path(denial_path).read_text())}
+pathlib.Path(output_path).write_text(json.dumps(doc, sort_keys=True, separators=(",", ":")) + "\n")
+PY
+  python "$evidence_driver" validate-candidate-terminal "$terminal_path" --expected-arm "$current_acceptance_arm" || return 1
+  candidate_failure_preserved=1
+}
 arm_cleanup() {
   local cleanup_complete=0 residue_root="${N3_RESIDUE_ROOT:-}"
   # These requests are deliberately idempotent: the pre-arm reset also runs
@@ -409,7 +444,10 @@ arm_cleanup() {
   [[ ! -e "$residue_root/run/happyranch-connector" && ! -e "$residue_root/run/happyranch-tsnet-sidecar" && ! -e "$residue_root/var/log/happyranch-connector" && ! -e "$residue_root/var/log/happyranch-tsnet-sidecar" ]] || cleanup_complete=1
   ! pgrep -f '(^|/)(happyranch-connector|happyranch-tsnet-sidecar)( |$)' >/dev/null || cleanup_complete=1
   [[ -z "$(sudo find "${residue_root:-/}" -maxdepth 1 \( -name '.happyranch-stage-*' -o -name '.happyranch-tmp-*' \) -print -quit)" ]] || cleanup_complete=1
-  (( cleanup_complete == 0 )) || fail "acceptance arm cleanup incomplete"
+  if (( cleanup_complete != 0 )); then
+    [[ "${current_acceptance_variant:-}" != candidate ]] || candidate_failure_phase=cleanup
+    fail "acceptance arm cleanup incomplete"
+  fi
 }
 arm_reset() {
   local arm_id="$1" variant="$2"
@@ -438,6 +476,8 @@ PY
 }
 for arm_spec in "${acceptance_arms[@]}"; do
   IFS=: read -r arm_id ordering variant <<<"$arm_spec"
+  current_acceptance_arm="$arm_id"; current_acceptance_variant="$variant"
+  candidate_failure_phase=pre_ready; candidate_failure_preserved=0; candidate_failure_preserving=0
   arm_reset "$arm_id" "$variant"
   arm_journal_cursor="$(current_journal_cursor)" || fail "current arm journal cursor unavailable"
   production_expected_peer_visible=0
@@ -459,8 +499,8 @@ for arm_spec in "${acceptance_arms[@]}"; do
     python "$evidence_driver" diagnose "$evidence_artifact" --id "$run_id:$arm_id:engine_start" --category engine_start --phase engine_initialization --actor tsnet-sidecar --unit happyranch-tsnet-sidecar.service
     arm_result_args=(--control-category engine_start --control-phase engine_initialization)
   else
+    candidate_failure_phase=ready
     if ! wait_for_candidate active happyranch-tsnet-sidecar.service; then
-      capture_denial_matrix "$arm_id"
       fail "AF_NETLINK candidate did not become READY"
     fi
     # This arm-fresh production marker is committed only after TSNetEngine has
@@ -469,16 +509,20 @@ for arm_spec in "${acceptance_arms[@]}"; do
     if sudo test -f /var/lib/happyranch-tsnet-sidecar/credential.consumed; then
       production_expected_peer_visible=1
     fi
-    sidecar_ip="$(sudo "$ts_dir/tailscale" --socket="$work/peer.sock" status --json | python -c 'import json,sys; d=json.load(sys.stdin); print(next(ip for p in d.get("Peer",{}).values() if p.get("HostName")=="home-sidecar-ci" for ip in p.get("TailscaleIPs",[]) if ":" not in ip))')" || { capture_denial_matrix "$arm_id"; fail "candidate ExpectedPeers visibility failed"; }
-    tsnet_open || { capture_denial_matrix "$arm_id"; fail "candidate virtual listener unreachable"; }
-    (( production_expected_peer_visible == 1 )) || { capture_denial_matrix "$arm_id"; fail "candidate production ExpectedPeers observation missing"; }
+    candidate_failure_phase=expected_peers
+    sidecar_ip="$(sudo "$ts_dir/tailscale" --socket="$work/peer.sock" status --json | python -c 'import json,sys; d=json.load(sys.stdin); print(next(ip for p in d.get("Peer",{}).values() if p.get("HostName")=="home-sidecar-ci" for ip in p.get("TailscaleIPs",[]) if ":" not in ip))')" || fail "candidate ExpectedPeers visibility failed"
+    candidate_failure_phase=listener
+    tsnet_open || fail "candidate virtual listener unreachable"
+    candidate_failure_phase=assertion
+    (( production_expected_peer_visible == 1 )) || fail "candidate production ExpectedPeers observation missing"
     arm_result_args=(--ready)
     (( production_expected_peer_visible == 1 )) && arm_result_args+=(--expected-peer-visible)
     arm_result_args+=(--virtual-listener-reachable)
   fi
   arm_cleanup
   # Receipt follows every production assertion, including cleanup.
-  acceptance_arm "$arm_id" "$ordering" "$variant" "${arm_result_args[@]}"
+  acceptance_arm "$arm_id" "$ordering" "$variant" "${arm_result_args[@]}" || fail "acceptance arm assertion failed"
+  current_acceptance_arm=""; current_acceptance_variant=""; candidate_failure_phase=""
 done
 
 # Restore one fresh candidate fixture for the existing lifecycle matrix. This

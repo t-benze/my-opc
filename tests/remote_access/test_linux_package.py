@@ -306,6 +306,7 @@ def test_real_systemd_control_receipt_accepts_one_current_arm_and_redacts_output
         "pinned_invocation": {
             "categories": ["engine_start"],
             "category_counts": {"credential_input": 0, "durable_commit": 0, "engine_start": 1, "network_join": 0},
+            "cardinality": "one",
             "qualifying_receipt_count": 1,
             "receipt_count": 1,
         },
@@ -435,6 +436,36 @@ def test_real_systemd_denial_matrix_executes_every_bounded_probe() -> None:
     assert 'systemd-run --quiet --wait --collect --pipe' in harness
     for sandbox_property in ("PrivateDevices=yes", "ProtectSystem=strict", "ProtectHome=yes", "CapabilityBoundingSet="):
         assert sandbox_property in harness
+
+
+def test_real_systemd_candidate_failures_preserve_settled_terminal_evidence() -> None:
+    harness = Path("app/linux/package/real_systemd_n3.sh").read_text()
+    assert "preserve_candidate_failure()" in harness
+    assert 'current_acceptance_variant="$variant"' in harness
+    assert 'candidate_failure_phase=ready' in harness
+    assert 'candidate_failure_phase=expected_peers' in harness
+    assert 'candidate_failure_phase=listener' in harness
+    assert 'candidate_failure_phase=assertion' in harness
+    assert 'candidate_failure_phase=cleanup' in harness
+    assert 'validate-candidate-terminal' in harness
+    assert 'candidate-terminal-evidence.json' in harness
+    fail_body = harness.split("fail() {", 1)[1].split("\n}", 1)[0]
+    assert "preserve_candidate_failure" in fail_body
+    preserve = harness.split("preserve_candidate_failure() {", 1)[1].split("\n}", 1)[0]
+    assert "capture_denial_matrix" in preserve
+    assert "settle_terminal_invocation" in preserve
+    assert "current_terminal_evidence" in preserve
+    assert preserve.index("capture_denial_matrix") < preserve.index("settle_terminal_invocation")
+
+
+def test_real_systemd_candidate_failure_preservation_covers_both_arms_and_all_exits() -> None:
+    harness = Path("app/linux/package/real_systemd_n3.sh").read_text()
+    for arm in ("ordering-a-candidate", "ordering-b-candidate"):
+        assert arm in harness
+    for phase in ("pre_ready", "ready", "expected_peers", "listener", "denial_matrix", "assertion", "cleanup"):
+        assert f"candidate_failure_phase={phase}" in harness
+    assert 'candidate_failure_preserved=1' in harness
+    assert '[[ "$current_acceptance_variant" == candidate' in harness
 
 
 def _run_real_systemd_arm_cleanup(tmp_path: Path, **env: str) -> subprocess.CompletedProcess[str]:

@@ -187,3 +187,62 @@ def test_denial_matrix_requires_real_bounded_secret_safe_measurements(mutation):
 
 def test_denial_matrix_accepts_each_required_measured_dimension():
     evidence.validate_denial_matrix(_valid_denial_matrix(), expected_arm="ordering-a-candidate")
+
+
+def _valid_candidate_terminal():
+    return {
+        "schema": "happyranch.n3.candidate-terminal-evidence", "version": 1,
+        "arm_id": "ordering-a-candidate", "phase": "ready",
+        "invocation_binding": "settled_current",
+        "terminal_evidence": {
+            "pinned_invocation": {"categories": ["engine_start"], "category_counts": {
+                "credential_input": 0, "engine_start": 1, "network_join": 0, "durable_commit": 0,
+            }, "receipt_count": 1, "qualifying_receipt_count": 1, "cardinality": "one"},
+            "window": {"categories": ["engine_start"], "category_counts": {
+                "credential_input": 0, "engine_start": 2, "network_join": 0, "durable_commit": 0,
+            }, "receipt_count": 2},
+            "systemd": {"result": "exit-code", "exec_main_status": 1},
+        },
+        "denial_matrix": _valid_denial_matrix(),
+    }
+
+
+@pytest.mark.parametrize("mutation", [
+    "missing", "wrong_arm", "bad_phase", "placeholder", "bad_cardinality", "tamper_counts",
+    "missing_systemd", "secret", "denial_arm", "incomplete_denial",
+])
+def test_candidate_terminal_validator_rejects_incomplete_or_tampered_evidence(mutation):
+    doc = _valid_candidate_terminal()
+    if mutation == "missing": doc.pop("phase")
+    elif mutation == "wrong_arm": doc["arm_id"] = "ordering-a-control"
+    elif mutation == "bad_phase": doc["phase"] = "provider said no"
+    elif mutation == "placeholder": doc["terminal_evidence"] = "unavailable"
+    elif mutation == "bad_cardinality": doc["terminal_evidence"]["pinned_invocation"]["cardinality"] = "multiple"
+    elif mutation == "tamper_counts": doc["terminal_evidence"]["pinned_invocation"]["receipt_count"] = 2
+    elif mutation == "missing_systemd": doc["terminal_evidence"].pop("systemd")
+    elif mutation == "secret": doc["phase"] = "token=/etc/happyranch/key"
+    elif mutation == "denial_arm": doc["denial_matrix"]["arm_id"] = "ordering-b-candidate"
+    elif mutation == "incomplete_denial": doc["denial_matrix"]["operations"].pop()
+    with pytest.raises((AssertionError, KeyError, TypeError)):
+        evidence.validate_candidate_terminal(doc, expected_arm="ordering-a-candidate")
+
+
+@pytest.mark.parametrize("count,cardinality", [(0, "zero"), (1, "one"), (2, "multiple")])
+def test_candidate_terminal_validator_distinguishes_receipt_cardinality(count, cardinality):
+    doc = _valid_candidate_terminal()
+    pinned = doc["terminal_evidence"]["pinned_invocation"]
+    pinned["category_counts"]["engine_start"] = count
+    pinned["receipt_count"] = pinned["qualifying_receipt_count"] = count
+    pinned["categories"] = ["engine_start"] if count else []
+    pinned["cardinality"] = cardinality
+    evidence.validate_candidate_terminal(doc, expected_arm="ordering-a-candidate")
+
+
+@pytest.mark.parametrize("arm", ["ordering-a-candidate", "ordering-b-candidate"])
+@pytest.mark.parametrize("phase", sorted(evidence.CANDIDATE_FAILURE_PHASES))
+def test_candidate_terminal_validator_accepts_each_arm_and_failure_phase(arm, phase):
+    doc = _valid_candidate_terminal()
+    doc["arm_id"] = arm
+    doc["phase"] = phase
+    doc["denial_matrix"]["arm_id"] = arm
+    evidence.validate_candidate_terminal(doc, expected_arm=arm)
