@@ -238,6 +238,37 @@ def test_candidate_terminal_validator_distinguishes_receipt_cardinality(count, c
     evidence.validate_candidate_terminal(doc, expected_arm="ordering-a-candidate")
 
 
+@pytest.mark.parametrize("phase", sorted(evidence.CANDIDATE_FAILURE_PHASES))
+@pytest.mark.parametrize("arm", ["ordering-a-candidate", "ordering-b-candidate"])
+def test_candidate_terminal_accepts_every_failure_boundary_for_both_candidates(arm, phase):
+    doc = _valid_candidate_terminal()
+    doc["arm_id"] = arm
+    doc["phase"] = phase
+    doc["denial_matrix"]["arm_id"] = arm
+    evidence.validate_candidate_terminal(doc, expected_arm=arm)
+
+
+@pytest.mark.parametrize("mutation", ["missing", "wrong_arm", "bad_phase", "bad_code", "extra", "secret"])
+def test_candidate_preservation_failure_is_bounded_and_fail_closed(mutation):
+    doc = {"schema": "happyranch.n3.candidate-preservation-failure", "version": 1,
+           "arm_id": "ordering-a-candidate", "phase": "pre_cursor", "failure_code": "cursor_unavailable"}
+    if mutation == "missing": doc.pop("failure_code")
+    elif mutation == "wrong_arm": doc["arm_id"] = "ordering-a-control"
+    elif mutation == "bad_phase": doc["phase"] = "provider prose"
+    elif mutation == "bad_code": doc["failure_code"] = "journal said secret"
+    elif mutation == "extra": doc["detail"] = "raw output"
+    elif mutation == "secret": doc["phase"] = "credential=/etc/happyranch/key"
+    with pytest.raises(AssertionError):
+        evidence.validate_candidate_preservation_failure(doc, expected_arm="ordering-a-candidate")
+
+
+def test_candidate_preservation_failure_accepts_closed_record():
+    evidence.validate_candidate_preservation_failure({
+        "schema": "happyranch.n3.candidate-preservation-failure", "version": 1,
+        "arm_id": "ordering-b-candidate", "phase": "pre_cursor", "failure_code": "cursor_unavailable",
+    }, expected_arm="ordering-b-candidate")
+
+
 @pytest.mark.parametrize("arm", ["ordering-a-candidate", "ordering-b-candidate"])
 @pytest.mark.parametrize("phase", sorted(evidence.CANDIDATE_FAILURE_PHASES))
 def test_candidate_terminal_validator_accepts_each_arm_and_failure_phase(arm, phase):

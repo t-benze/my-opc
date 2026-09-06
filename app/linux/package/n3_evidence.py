@@ -35,9 +35,11 @@ DENIAL_RESULTS = {"allow", "deny", "unknown"}
 DENIAL_CATEGORIES = {"none", "permission_denied", "unavailable", "timeout", "operational_error"}
 DENIAL_ERRNOS = {None, "EACCES", "EPERM", "ENOENT", "ENODEV", "EAFNOSUPPORT", "ETIMEDOUT", "ECONNREFUSED", "EIO", "OTHER"}
 CANDIDATE_FAILURE_PHASES = {
-    "pre_ready", "ready", "expected_peers", "listener", "denial_matrix",
-    "assertion", "cleanup",
+    "pre_cursor", "pre_reset", "setup_start", "ready", "expected_peers",
+    "listener", "denial_matrix", "assertion", "cleanup",
+    "post_cleanup_assertion",
 }
+PRESERVATION_FAILURE_CODES = {"cursor_unavailable", "invocation_unavailable", "snapshot_unavailable", "snapshot_invalid"}
 PHASES = {
     "startup": ("process_absent", "tsnet_admission_absent", "connector_staged_credential_service_readable_non_writable", "sidecar_staged_credential_service_readable_non_writable", "credential_source_retired", "credential_dropin_retired", "composite_ready_after_sidecar", "missing_consumed_state_failed_closed"),
     "admission": ("tsnet_admission_reachable",),
@@ -204,6 +206,19 @@ def validate_candidate_terminal(doc: dict, *, expected_arm: str | None = None) -
     assert not any(marker in rendered for marker in SECRET_MARKERS)
 
 
+def validate_candidate_preservation_failure(doc: dict, *, expected_arm: str | None = None) -> None:
+    assert set(doc) == {"schema", "version", "arm_id", "phase", "failure_code"}
+    assert doc["schema"] == "happyranch.n3.candidate-preservation-failure" and doc["version"] == 1
+    candidate_arms = {item[0] for item in ARM_SPECS if item[2] == "candidate"}
+    assert doc["arm_id"] in candidate_arms
+    if expected_arm is not None:
+        assert doc["arm_id"] == expected_arm
+    assert doc["phase"] in CANDIDATE_FAILURE_PHASES
+    assert doc["failure_code"] in PRESERVATION_FAILURE_CODES
+    rendered = json.dumps(doc, sort_keys=True).lower()
+    assert not any(marker in rendered for marker in SECRET_MARKERS)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
@@ -231,6 +246,8 @@ def main() -> None:
     denial.add_argument("--expected-arm", required=True)
     candidate_terminal = sub.add_parser("validate-candidate-terminal")
     candidate_terminal.add_argument("path", type=Path); candidate_terminal.add_argument("--expected-arm", required=True)
+    preservation_failure = sub.add_parser("validate-candidate-preservation-failure")
+    preservation_failure.add_argument("path", type=Path); preservation_failure.add_argument("--expected-arm", required=True)
     args = parser.parse_args()
     if args.command == "init":
         doc = {"schema": SCHEMA, "version": VERSION,
@@ -280,8 +297,10 @@ def main() -> None:
         validate(_load(args.path), expected_subject=args.expected_subject, expected_run=args.expected_run)
     elif args.command == "validate-denial-matrix":
         validate_denial_matrix(_load(args.path), expected_arm=args.expected_arm)
-    else:
+    elif args.command == "validate-candidate-terminal":
         validate_candidate_terminal(_load(args.path), expected_arm=args.expected_arm)
+    else:
+        validate_candidate_preservation_failure(_load(args.path), expected_arm=args.expected_arm)
 
 
 if __name__ == "__main__":

@@ -452,20 +452,141 @@ def test_real_systemd_candidate_failures_preserve_settled_terminal_evidence() ->
     fail_body = harness.split("fail() {", 1)[1].split("\n}", 1)[0]
     assert "preserve_candidate_failure" in fail_body
     preserve = harness.split("preserve_candidate_failure() {", 1)[1].split("\n}", 1)[0]
-    assert "capture_denial_matrix" in preserve
-    assert "settle_terminal_invocation" in preserve
-    assert "current_terminal_evidence" in preserve
-    assert preserve.index("capture_denial_matrix") < preserve.index("settle_terminal_invocation")
+    assert "capture_candidate_snapshot" in preserve
+    snapshot = harness.split("capture_candidate_snapshot() {", 1)[1].split("\narm_cleanup() {", 1)[0]
+    assert "capture_denial_matrix" in snapshot
+    assert "settle_terminal_invocation" in snapshot
+    assert "current_terminal_evidence" in snapshot
+    assert snapshot.index("capture_denial_matrix") < snapshot.index("settle_terminal_invocation")
 
 
 def test_real_systemd_candidate_failure_preservation_covers_both_arms_and_all_exits() -> None:
     harness = Path("app/linux/package/real_systemd_n3.sh").read_text()
     for arm in ("ordering-a-candidate", "ordering-b-candidate"):
         assert arm in harness
-    for phase in ("pre_ready", "ready", "expected_peers", "listener", "denial_matrix", "assertion", "cleanup"):
+    for phase in ("pre_cursor", "pre_reset", "setup_start", "ready", "expected_peers", "listener", "denial_matrix", "assertion", "cleanup", "post_cleanup_assertion"):
         assert f"candidate_failure_phase={phase}" in harness
     assert 'candidate_failure_preserved=1' in harness
     assert '[[ "$current_acceptance_variant" == candidate' in harness
+
+
+@pytest.mark.parametrize("arm", ["ordering-a-candidate", "ordering-b-candidate"])
+@pytest.mark.parametrize("phase", [
+    "pre_cursor", "pre_reset", "setup_start", "ready", "expected_peers", "listener",
+    "denial_matrix", "assertion", "cleanup", "post_cleanup_assertion",
+])
+def test_real_systemd_fault_hook_executes_every_candidate_boundary(arm: str, phase: str) -> None:
+    harness = Path("app/linux/package/real_systemd_n3.sh").read_text()
+    helper = "candidate_boundary() {" + harness.split("candidate_boundary() {", 1)[1].split("\nport_open()", 1)[0]
+    result = subprocess.run(
+        ["bash", "-c", f"set -euo pipefail\n{helper}\ncurrent_acceptance_arm={arm}\ncandidate_boundary {phase}"],
+        capture_output=True, text=True, check=False,
+        env=os.environ | {"N3_FAULT_PHASE": phase},
+    )
+    assert result.returncode != 0
+
+
+def test_real_systemd_snapshot_is_captured_before_destructive_cleanup() -> None:
+    harness = Path("app/linux/package/real_systemd_n3.sh").read_text()
+    loop = harness.split('for arm_spec in "${acceptance_arms[@]}"; do', 1)[1].split("\n# Restore one fresh candidate fixture", 1)[0]
+    assert loop.index("capture_candidate_snapshot") < loop.index('arm_cleanup || fail')
+    assert loop.index('candidate_failure_phase=post_cleanup_assertion') > loop.index('arm_cleanup || fail')
+    preserve = harness.split("preserve_candidate_failure() {", 1)[1].split("\nwrite_candidate_preservation_failure() {", 1)[0]
+    assert preserve.index('[[ ! -s "$candidate_snapshot_path" ]]') < preserve.index('validate-candidate-terminal')
+
+
+@pytest.mark.parametrize("arm", ["ordering-a-candidate", "ordering-b-candidate"])
+@pytest.mark.parametrize("phase", [
+    "pre_cursor", "pre_reset", "setup_start", "ready", "expected_peers", "listener",
+    "denial_matrix", "assertion", "cleanup", "post_cleanup_assertion",
+])
+def test_real_fail_lifecycle_preserves_then_cleans_every_candidate_boundary(tmp_path: Path, arm: str, phase: str) -> None:
+    harness = Path("app/linux/package/real_systemd_n3.sh").read_text()
+    fail_helper = "fail() {" + harness.split("fail() {", 1)[1].split("\nwait_for() {", 1)[0]
+    log = tmp_path / "lifecycle.log"
+    script = f'''set -euo pipefail
+current_acceptance_arm={arm}
+current_acceptance_variant=candidate
+candidate_failure_phase={phase}
+candidate_failure_preserved=0
+candidate_failure_preserving=0
+preserve_candidate_failure() {{ printf 'preserve:%s:%s\n' "$current_acceptance_arm" "$candidate_failure_phase" >>"$LIFECYCLE_LOG"; candidate_failure_preserved=1; }}
+arm_cleanup() {{ printf 'cleanup:%s:%s\n' "$current_acceptance_arm" "$candidate_failure_phase" >>"$LIFECYCLE_LOG"; }}
+{fail_helper}
+fail injected
+'''
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False,
+                            env=os.environ | {"LIFECYCLE_LOG": str(log)})
+    assert result.returncode == 1
+    assert log.read_text().splitlines() == [f"preserve:{arm}:{phase}", f"cleanup:{arm}:{phase}"]
+
+
+@pytest.mark.parametrize("arm", ["ordering-a-candidate", "ordering-b-candidate"])
+@pytest.mark.parametrize("phase", ["cleanup", "post_cleanup_assertion"])
+def test_real_preserver_uses_settled_snapshot_after_observability_is_destroyed(tmp_path: Path, arm: str, phase: str) -> None:
+    harness = Path("app/linux/package/real_systemd_n3.sh").read_text()
+    helpers = "preserve_candidate_failure() {" + harness.split("preserve_candidate_failure() {", 1)[1].split("\narm_cleanup() {", 1)[0]
+    diagnostics = tmp_path / "diagnostics"; diagnostics.mkdir()
+    counts = {"credential_input": 0, "engine_start": 1, "network_join": 0, "durable_commit": 0}
+    snapshot = {
+        "pinned_invocation": {"categories": ["engine_start"], "category_counts": counts,
+                              "receipt_count": 1, "qualifying_receipt_count": 1, "cardinality": "one"},
+        "window": {"categories": ["engine_start"], "category_counts": counts, "receipt_count": 1},
+        "systemd": {"result": "exit-code", "exec_main_status": 1},
+    }
+    denial = {"schema": "happyranch.n3.sandbox-denial-matrix", "version": 1, "arm_id": arm,
+              "operations": [{"id": operation, "measured": True, "result": "allow", "category": "none", "errno": None}
+                             for operation in ("address_family_netlink", "linux_capabilities", "device_access",
+                                               "writable_paths", "control_plane_operations")]}
+    snapshot_path = diagnostics / f"{arm}-candidate-settled-snapshot.json"
+    snapshot_path.write_text(json.dumps({"terminal_evidence": snapshot, "denial_matrix": denial}))
+    script = f'''set -euo pipefail
+current_acceptance_arm={arm}; candidate_failure_phase={phase}; candidate_failure_preserving=0; candidate_failure_preserved=0
+arm_journal_cursor=fresh; candidate_snapshot_path="$SNAPSHOT"; diagnostics="$DIAGNOSTICS"; evidence_driver="$DRIVER"
+capture_candidate_snapshot() {{ echo should-not-observe >&2; return 99; }}
+{helpers}
+rm -f "$OBSERVABILITY"
+preserve_candidate_failure
+'''
+    observable = tmp_path / "unit.properties"; observable.write_text("present")
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False, env=os.environ | {
+        "SNAPSHOT": str(snapshot_path), "DIAGNOSTICS": str(diagnostics),
+        "DRIVER": str(Path("app/linux/package/n3_evidence.py").resolve()), "OBSERVABILITY": str(observable),
+    })
+    assert result.returncode == 0, result.stderr
+    assert "should-not-observe" not in result.stderr
+    terminal = json.loads((diagnostics / f"{arm}-candidate-terminal-evidence.json").read_text())
+    assert terminal["arm_id"] == arm and terminal["phase"] == phase
+
+
+@pytest.mark.parametrize("cursor,started,phase,code", [
+    ("", "0", "pre_cursor", "cursor_unavailable"),
+    ("stale-prior-arm-cursor", "0", "pre_reset", "invocation_unavailable"),
+])
+def test_real_preserver_never_consumes_empty_or_stale_pre_arm_state(
+    tmp_path: Path, cursor: str, started: str, phase: str, code: str,
+) -> None:
+    harness = Path("app/linux/package/real_systemd_n3.sh").read_text()
+    helpers = "preserve_candidate_failure() {" + harness.split("preserve_candidate_failure() {", 1)[1].split("\narm_cleanup() {", 1)[0]
+    diagnostics = tmp_path / "diagnostics"; diagnostics.mkdir()
+    script = f'''set -euo pipefail
+current_acceptance_arm=ordering-a-candidate; candidate_failure_phase={phase}
+candidate_failure_preserving=0; candidate_failure_preserved=0; candidate_invocation_started={started}
+arm_journal_cursor={cursor!r}; candidate_snapshot_path="$DIAGNOSTICS/missing"; diagnostics="$DIAGNOSTICS"; evidence_driver="$DRIVER"
+capture_candidate_snapshot() {{ echo stale-consumed >>"$CALL_LOG"; return 0; }}
+{helpers}
+preserve_candidate_failure
+'''
+    call_log = tmp_path / "calls"
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False, env=os.environ | {
+        "DIAGNOSTICS": str(diagnostics), "DRIVER": str(Path("app/linux/package/n3_evidence.py").resolve()),
+        "CALL_LOG": str(call_log),
+    })
+    assert result.returncode != 0
+    assert not call_log.exists()
+    record = json.loads((diagnostics / "ordering-a-candidate-candidate-preservation-failure.json").read_text())
+    assert record == {"schema": "happyranch.n3.candidate-preservation-failure", "version": 1,
+                      "arm_id": "ordering-a-candidate", "phase": phase, "failure_code": code}
 
 
 def _run_real_systemd_arm_cleanup(tmp_path: Path, **env: str) -> subprocess.CompletedProcess[str]:
