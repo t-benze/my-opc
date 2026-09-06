@@ -1,0 +1,115 @@
+name: macOS integration acceptance probe
+
+on:
+  workflow_dispatch:
+
+jobs:
+  acceptance:
+    name: macOS 15 integration acceptance
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - name: Public checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Prepare empty attempt home
+        id: attempt
+        shell: bash
+        run: |
+          set -euo pipefail
+          attempt_home="$(mktemp -d "${RUNNER_TEMP}/happyranch-macos-acceptance.XXXXXX")"
+          chmod 700 "$attempt_home"
+          echo "ATTEMPT_HOME=$attempt_home" >> "$GITHUB_ENV"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          enable-cache: true
+          python-version: "3.12"
+
+      - name: Sync public dependencies (frozen)
+        env:
+          HOME: ${{ env.ATTEMPT_HOME }}
+          ANTHROPIC_API_KEY: ""
+          OPENAI_API_KEY: ""
+          SSH_AUTH_SOCK: ""
+        run: |
+          unset ANTHROPIC_API_KEY OPENAI_API_KEY SSH_AUTH_SOCK
+          uv sync --frozen
+
+      - name: Emit host capability diagnostics
+        shell: bash
+        env:
+          HOME: ${{ env.ATTEMPT_HOME }}
+        run: |
+          set -u
+          sw_vers
+          uname -a
+          for capability in systemctl ip setsid; do
+            if command -v "$capability"; then
+              "$capability" --version 2>&1 | head -n 1 || true
+            else
+              echo "$capability: unavailable"
+            fi
+          done
+          uv run python - <<'PY'
+          import ctypes
+          import os
+          import sys
+
+          print(f"platform={sys.platform}")
+          for name in ("getpgid", "killpg", "posix_spawn", "setsid"):
+              print(f"os.{name}={hasattr(os, name)}")
+          try:
+              libproc = ctypes.CDLL("/usr/lib/libproc.dylib")
+              symbols = all(hasattr(libproc, name) for name in ("proc_listpids", "proc_pidinfo"))
+              print(f"libproc_symbols={symbols}")
+          except OSError as error:
+              print(f"libproc=unavailable ({error})")
+          PY
+
+      - name: Run exact integration acceptance workload
+        env:
+          HOME: ${{ env.ATTEMPT_HOME }}
+          TMPDIR: ${{ env.ATTEMPT_HOME }}/tmp
+          HAPPYRANCH_DAEMON_HOME: ${{ env.ATTEMPT_HOME }}/.happyranch
+          HAPPYRANCH_ORG_SLUG: ""
+          HAPPYRANCH_TASK_TMP_ROOT: ""
+          HAPPYRANCH_TASK_SCRATCH_MANIFEST: ""
+          HAPPYRANCH_CANONICAL_STORE_ROOT: ""
+          HAPPYRANCH_MACOS_ACCEPTANCE_PROFILE: ${{ github.workspace }}/.github/acceptance/partition-macos.json
+          HAPPYRANCH_MACOS_ACCEPTANCE_REPORT: ${{ github.workspace }}/macos-integration-acceptance-report.json
+          PYTEST_PLUGINS: macos_integration_acceptance
+          PYTHONPATH: ${{ github.workspace }}/scripts
+          ANTHROPIC_API_KEY: ""
+          OPENAI_API_KEY: ""
+          CLAUDE_CONFIG_DIR: ""
+          CODEX_HOME: ""
+          SSH_AUTH_SOCK: ""
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$TMPDIR" "$HAPPYRANCH_DAEMON_HOME"
+          while IFS='=' read -r name _; do
+            case "$name" in
+              HAPPYRANCH_MACOS_ACCEPTANCE_PROFILE|HAPPYRANCH_MACOS_ACCEPTANCE_REPORT|HAPPYRANCH_DAEMON_HOME)
+                ;;
+              HAPPYRANCH_*|*TOKEN*|*SECRET*|*CREDENTIAL*|*API_KEY*|*ACCESS_KEY*|SSH_AUTH_SOCK|CLAUDE_CONFIG_DIR|CODEX_HOME)
+                echo "scrubbed ambient variable: $name"
+                unset "$name"
+                ;;
+            esac
+          done < <(env)
+          uv run pytest tests/ -v -m integration
+
+      - name: Emit comparator diagnostics
+        if: always()
+        run: |
+          if [ -f macos-integration-acceptance-report.json ]; then
+            cat macos-integration-acceptance-report.json
+          else
+            echo "macOS acceptance comparator report missing"
+            exit 1
+          fi
