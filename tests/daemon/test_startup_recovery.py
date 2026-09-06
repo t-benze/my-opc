@@ -1117,8 +1117,8 @@ def test_sweep_orphaned_result_preserves_local_ci_in_audit_and_consumption(tmp_p
     }, f"audit payload missing local_ci: {payload}"
 
 
-def test_sweep_orphaned_thread_originated_supersede_remains_unconsumed(tmp_path, monkeypatch):
-    """Startup recovery must not bypass the phase-1 thread-origin rejection."""
+def test_sweep_orphaned_thread_originated_supersede_escalates_once(tmp_path, monkeypatch):
+    """A rejected thread-origin decision is durable and cannot replay."""
     import json
 
     db, orch, queue = _seed_org_with_orch(tmp_path)
@@ -1152,8 +1152,115 @@ def test_sweep_orphaned_thread_originated_supersede_remains_unconsumed(tmp_path,
 
     _sweep_on_startup(db, queue, "test", orch)
 
-    assert db.get_task("T-STARTUP-SUP").status is TaskStatus.IN_PROGRESS
+    task = db.get_task("T-STARTUP-SUP")
+    assert task.status is TaskStatus.ESCALATED
+    assert task.note == (
+        "manager supersession rejected: thread-origin roots are not eligible "
+        "for supersession; founder action required"
+    )
     assert db.execute("SELECT COUNT(*) FROM manager_supersessions").fetchone()[0] == 0
+    assert queue._queue.empty()
+    logs = db.get_audit_logs("T-STARTUP-SUP")
+    assert [row["action"] for row in logs].count("orchestration_step") == 1
+    escalation = next(row for row in logs if row["action"] == "escalation")
+    assert escalation["payload"] == {"reason": task.note}
+    authority = next(row for row in logs if row["action"] == "authority_hook")
+    assert authority["payload"] == {
+        "outcome": "not_applicable",
+        "reason_code": "runtime_manager_supersession_thread_origin_ineligible",
+        "reason": "runtime-raised escalation is not an authority decision",
+        "causal_escalation_audit_id": escalation["id"],
+    }
+
+    # Escalated rows are outside both startup and zombie recovery allowlists.
+    # A replay pass therefore cannot consume the same decision a second time.
+    _sweep_on_startup(db, queue, "test", orch)
+    replay_logs = db.get_audit_logs("T-STARTUP-SUP")
+    assert [row["action"] for row in replay_logs].count("orchestration_step") == 1
+    assert [row["action"] for row in replay_logs].count("escalation") == 1
+
+
+def test_sweep_orphaned_non_thread_supersede_still_commits_atomically(tmp_path, monkeypatch):
+    """The rejection correction does not narrow ordinary eligible supersession."""
+    db, orch, queue = _seed_org_with_orch(tmp_path)
+    db.insert_task(TaskRecord(
+        id="T-STARTUP-ELIGIBLE", brief="original", team="engineering",
+        assigned_agent="engineering_head", status=TaskStatus.IN_PROGRESS,
+        current_session_id="sess-eligible",
+    ))
+    db.insert_task_result(
+        task_id="T-STARTUP-ELIGIBLE", agent="engineering_head",
+        session_id="sess-eligible", status="completed", confidence_score=90,
+        output_summary="replace", decision_json=json.dumps({
+            "action": "supersede", "successor_brief": "replacement",
+            "rationale": "new evidence", "attestation": {
+                "recovery_reason": "Evidence invalidated the old plan.",
+                "policy_product_intent_unchanged": True,
+                "no_budget_or_external_commitment": True,
+                "no_permission_or_cross_team_change": True,
+                "no_schema_auth_security_privacy_or_data_access_change": True,
+                "no_unresolved_founder_gate": True,
+            },
+        }),
+    )
+    monkeypatch.setenv("HAPPYRANCH_MANAGER_SUPERSESSION_ENABLED", "1")
+    monkeypatch.setenv("HAPPYRANCH_MANAGER_SUPERSESSION_PILOT_TEAM", "engineering")
+
+    _sweep_on_startup(db, queue, "test", orch)
+
+    predecessor = db.get_task("T-STARTUP-ELIGIBLE")
+    assert predecessor.status is TaskStatus.SUPERSEDED
+    relation = db.execute("SELECT * FROM manager_supersessions").fetchone()
+    successor = db.get_task(relation["successor_task_id"])
+    assert successor.status is TaskStatus.PENDING
+    assert queue._queue.get_nowait() == ("test", successor.id, None)
+
+
+def test_sweep_supersede_competing_cancellation_remains_silent_race(tmp_path, monkeypatch):
+    """A cancellation winning the supersession CAS retains its terminal state."""
+    db, orch, queue = _seed_org_with_orch(tmp_path)
+    task_id = "T-STARTUP-RACE"
+    db.insert_task(TaskRecord(
+        id=task_id, brief="original", team="engineering",
+        assigned_agent="engineering_head", status=TaskStatus.IN_PROGRESS,
+        current_session_id="sess-race",
+    ))
+    db.insert_task_result(
+        task_id=task_id, agent="engineering_head", session_id="sess-race",
+        status="completed", confidence_score=90, output_summary="replace",
+        decision_json=json.dumps({
+            "action": "supersede", "successor_brief": "replacement",
+            "rationale": "new evidence", "attestation": {
+                "recovery_reason": "Evidence invalidated the old plan.",
+                "policy_product_intent_unchanged": True,
+                "no_budget_or_external_commitment": True,
+                "no_permission_or_cross_team_change": True,
+                "no_schema_auth_security_privacy_or_data_access_change": True,
+                "no_unresolved_founder_gate": True,
+            },
+        }),
+    )
+
+    def cancellation_wins(*args, **kwargs):
+        db.update_task(
+            task_id, status=TaskStatus.CANCELLED,
+            cancelled_at="2026-09-06T00:00:00+00:00",
+            completed_at="2026-09-06T00:00:00+00:00",
+            note="cancelled by founder",
+        )
+        return None
+
+    monkeypatch.setattr(db, "try_manager_supersede", cancellation_wins)
+    monkeypatch.setenv("HAPPYRANCH_MANAGER_SUPERSESSION_ENABLED", "1")
+    monkeypatch.setenv("HAPPYRANCH_MANAGER_SUPERSESSION_PILOT_TEAM", "engineering")
+
+    _sweep_on_startup(db, queue, "test", orch)
+
+    assert db.get_task(task_id).status is TaskStatus.CANCELLED
+    assert db.execute("SELECT COUNT(*) FROM manager_supersessions").fetchone()[0] == 0
+    assert not any(
+        row["action"] == "escalation" for row in db.get_audit_logs(task_id)
+    )
     assert queue._queue.empty()
 
 

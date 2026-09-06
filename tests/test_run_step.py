@@ -319,7 +319,7 @@ def test_completion_consumer_enforces_manager_session_and_root_gates(
     assert orch._queue.qsize() == 0
 
 
-def test_completion_consumer_rejects_thread_origin_without_founder_side_effects(runtime, db):
+def test_completion_consumer_escalates_thread_origin_rejection_once(runtime, db):
     from runtime.orchestrator.orchestrator import Orchestrator
 
     _claimed_manager_root(db)
@@ -335,11 +335,177 @@ def test_completion_consumer_rejects_thread_origin_without_founder_side_effects(
 
     _consume_manager_supersede(orch, "T-SUP")
 
-    assert db.get_task("T-SUP").status is TaskStatus.IN_PROGRESS
+    task = db.get_task("T-SUP")
+    assert task.status is TaskStatus.ESCALATED
+    assert task.note == (
+        "manager supersession rejected: thread-origin roots are not eligible "
+        "for supersession; founder action required"
+    )
     assert db.execute("SELECT COUNT(*) FROM manager_supersessions").fetchone()[0] == 0
-    assert [row["action"] for row in db.get_audit_logs("T-SUP") if row["action"] == "escalation"] == []
-    assert founder_notifications == []
+    logs = db.get_audit_logs("T-SUP")
+    assert [row["action"] for row in logs].count("orchestration_step") == 1
+    escalation = next(row for row in logs if row["action"] == "escalation")
+    assert escalation["payload"] == {"reason": task.note}
+    authority = next(row for row in logs if row["action"] == "authority_hook")
+    assert authority["payload"] == {
+        "outcome": "not_applicable",
+        "reason_code": "runtime_manager_supersession_thread_origin_ineligible",
+        "reason": "runtime-raised escalation is not an authority decision",
+        "causal_escalation_audit_id": escalation["id"],
+    }
+    assert founder_notifications == [{
+        "task_id": "T-SUP",
+        "agent": "engineering_head",
+        "reason": task.note,
+        "last_summary": "replace the plan",
+    }]
     assert orch._queue.qsize() == 0
+
+
+@pytest.mark.parametrize(
+    ("status", "block_kind"),
+    [
+        (TaskStatus.PENDING, None),
+        (TaskStatus.IN_PROGRESS, BlockKind.DELEGATED),
+        (TaskStatus.CANCELLED, None),
+    ],
+    ids=["pending", "blocked", "cancelled"],
+)
+def test_completion_consumer_thread_origin_rejection_preserves_competing_state(
+    runtime, db, monkeypatch, status: TaskStatus, block_kind: BlockKind | None,
+):
+    """A transition immediately before the rejection CAS remains authoritative."""
+    from runtime.orchestrator.orchestrator import Orchestrator
+
+    _claimed_manager_root(db)
+    db.execute("UPDATE tasks SET dispatched_from_thread_id = 'THR-152' WHERE id = 'T-SUP'")
+    db._conn.commit()
+    orch = Orchestrator(
+        db=db, settings=Settings(), paths=runtime, slug="test",
+        teams=TeamsRegistry.load(runtime.root),
+    )
+    orch._queue = _SlugQueue()
+    founder_notifications: list[dict] = []
+    thread_projections: list[tuple] = []
+    orch.notify_escalated = lambda **kwargs: founder_notifications.append(kwargs)
+    monkeypatch.setattr(
+        "runtime.orchestrator.run_step._maybe_post_thread_escalation",
+        lambda *args, **kwargs: thread_projections.append((args, kwargs)),
+    )
+    real_reject = db.try_reject_thread_origin_manager_supersede
+
+    def competing_transition_wins(*args, **kwargs):
+        db.update_task(
+            "T-SUP", status=status, block_kind=block_kind,
+            note="competing transition",
+            **({
+                "cancelled_at": "2026-09-06T00:00:00+00:00",
+                "completed_at": "2026-09-06T00:00:00+00:00",
+            } if status is TaskStatus.CANCELLED else {}),
+        )
+        return real_reject(*args, **kwargs)
+
+    monkeypatch.setattr(
+        db, "try_reject_thread_origin_manager_supersede", competing_transition_wins,
+    )
+
+    _consume_manager_supersede(orch, "T-SUP")
+
+    task = db.get_task("T-SUP")
+    assert task.status is status
+    assert task.block_kind is block_kind
+    assert task.note == "competing transition"
+    assert not [
+        row for row in db.get_audit_logs("T-SUP")
+        if row["action"] in {"escalation", "authority_hook"}
+    ]
+    assert founder_notifications == []
+    assert thread_projections == []
+    assert db.execute("SELECT COUNT(*) FROM manager_supersessions").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize(
+    "live_work",
+    ["descendant_task", "pending_root_job", "running_descendant_job"],
+)
+def test_completion_consumer_thread_origin_rejection_preserves_competing_live_work(
+    runtime, db, monkeypatch, live_work: str,
+):
+    """Family work landing immediately before the rejection CAS wins silently."""
+    from runtime.orchestrator.orchestrator import Orchestrator
+
+    _claimed_manager_root(db)
+    db.execute("UPDATE tasks SET dispatched_from_thread_id = 'THR-152' WHERE id = 'T-SUP'")
+    db._conn.commit()
+    orch = Orchestrator(
+        db=db, settings=Settings(), paths=runtime, slug="test",
+        teams=TeamsRegistry.load(runtime.root),
+    )
+    orch._queue = _SlugQueue()
+    founder_notifications: list[dict] = []
+    thread_projections: list[tuple] = []
+    orch.notify_escalated = lambda **kwargs: founder_notifications.append(kwargs)
+    monkeypatch.setattr(
+        "runtime.orchestrator.run_step._maybe_post_thread_escalation",
+        lambda *args, **kwargs: thread_projections.append((args, kwargs)),
+    )
+    real_reject = db.try_reject_thread_origin_manager_supersede
+
+    def live_work_lands(*args, **kwargs):
+        descendant_id = "T-LIVE"
+        if live_work in {"descendant_task", "running_descendant_job"}:
+            db.insert_task(TaskRecord(
+                id=descendant_id,
+                status=(
+                    TaskStatus.PENDING
+                    if live_work == "descendant_task"
+                    else TaskStatus.COMPLETED
+                ),
+                assigned_agent="dev_agent",
+                team="engineering",
+                brief="competing family work",
+                parent_task_id="T-SUP",
+                task_type="subtask",
+            ))
+        if live_work != "descendant_task":
+            job_status = "pending" if live_work == "pending_root_job" else "running"
+            job_task_id = "T-SUP" if live_work == "pending_root_job" else descendant_id
+            db.execute(
+                """INSERT INTO jobs
+                   (id, task_id, agent_name, title, script_text, interpreter, status, created_at)
+                   VALUES ('JOB-LIVE', ?, 'dev_agent', 'live', 'true', 'bash', ?,
+                           '2026-09-06T00:00:00+00:00')""",
+                (job_task_id, job_status),
+            )
+            db._conn.commit()
+        return real_reject(*args, **kwargs)
+
+    monkeypatch.setattr(
+        db, "try_reject_thread_origin_manager_supersede", live_work_lands,
+    )
+
+    _consume_manager_supersede(orch, "T-SUP")
+
+    task = db.get_task("T-SUP")
+    assert task.status is TaskStatus.IN_PROGRESS
+    assert task.block_kind is None
+    if live_work == "descendant_task":
+        assert db.get_task("T-LIVE").status is TaskStatus.PENDING
+    else:
+        assert db.get_job_status("JOB-LIVE") == (
+            "pending" if live_work == "pending_root_job" else "running"
+        )
+    assert not [
+        row for row in db.get_audit_logs("T-SUP")
+        if row["action"] in {
+            "escalation", "authority_hook", "manager_supersession",
+        }
+    ]
+    assert founder_notifications == []
+    assert thread_projections == []
+    assert orch._queue.qsize() == 0
+    assert db.execute("SELECT COUNT(*) FROM manager_supersessions").fetchone()[0] == 0
+    assert db.execute("SELECT COUNT(*) FROM tasks WHERE id = 'TASK-001'").fetchone()[0] == 0
 
 
 @pytest.mark.parametrize("enqueue_fails", [False, True], ids=["enqueue", "recovery"])
