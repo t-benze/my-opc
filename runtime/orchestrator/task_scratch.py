@@ -66,7 +66,7 @@ def _mkdir_owned(path: Path, *, parent: Path | None = None) -> None:
     os.chmod(path, 0o700)
 
 
-def _validated_producers(
+def validate_task_scratch_manifest(
     data: object, *, expected_task_id: str, expected_root: Path,
 ) -> list[dict[str, object]]:
     """Validate the exact bounded version-1 manifest and producer shape."""
@@ -181,7 +181,7 @@ def _write_observation(contract: TaskScratch) -> None:
                     raise TaskScratchError("manifest is corrupt")
                 if current.get("version") != MANIFEST_VERSION or current.get("task_id") != contract.task_id:
                     raise TaskScratchError("manifest identity/version mismatch")
-                producers = _validated_producers(
+                producers = validate_task_scratch_manifest(
                     current,
                     expected_task_id=contract.task_id,
                     expected_root=contract.root,
@@ -289,7 +289,7 @@ def observe_task_scratch_manifest(*, workspace: Path, task_id: str) -> dict[str,
             raise TaskScratchError("manifest is corrupt")
         if data.get("version") != MANIFEST_VERSION or data.get("task_id") != task_id:
             return {"status": "stale", "path": str(path)}
-        _validated_producers(
+        validate_task_scratch_manifest(
             data,
             expected_task_id=task_id,
             expected_root=expected_root,

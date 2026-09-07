@@ -1328,6 +1328,26 @@ existing THR-090 zombie-reaper lifecycle evidence plus immediate fail-closed
 OS process/cwd/open-file checks; Git/repository evidence remains a skip rule.
 Small daemon callback payload contracts are unchanged.
 
+THR-195 B1 also defines a dormant `task_scratch_reclamation` engine imported
+only by tests. Its executor accepts immutable finalized ledger rows rather than
+manifest paths or candidate lists, and performs literal-root fd-relative
+no-follow same-device removal with exact allocated-byte/inode accounting and
+protected parent/manifest/lock/sibling postconditions. Sealing accepts explicit
+caller-constructible lifecycle/liveness/current-boot coverage assertion shapes
+with no permissive defaults and rejects missing, malformed, stale-boot, truncated,
+ambiguous, unsupported-platform, recovery/job/live-reference, unavailable, or
+internally inconsistent values. These inputs are untrusted: B1 neither proves
+their provenance nor supplies authoritative producers; those integrations are
+deferred to B2/B3. Sealing also enforces the 60-second newest-mtime floor.
+Pathname removal follows verified parent/root identity and complete sibling/
+directory-entry checks; every detected pre-action mismatch fails with zero
+reclaimed claims. Portable POSIX unlink/rmdir is not inode-bound, so B1 excludes
+a deliberately hostile same-UID replacement in the final identity-check-to-
+pathname-syscall window and does not promise that replacement survives.
+Git/worktree/bare-repository ancestor or descendant evidence fails closed. B1
+adds no teardown/scheduler caller, activation, deployment, live deletion, or
+legacy-backlog eligibility.
+
 1. **Measures** the OWNING AGENT's workspace with an explicit bounded,
    fail-open budget: one true wall-clock deadline shared across all
    collection — each git subprocess receives ``min(per-call cap, remaining

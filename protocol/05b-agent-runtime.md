@@ -1323,6 +1323,24 @@ to shared ``/tmp``; same-UID post-validation races remain because the
 workspace is not an OS isolation boundary. The daemon still never inspects or
 reclaims ``/tmp``.
 Small atomic daemon callback payloads retain their explicit ``/tmp`` contracts.
+
+THR-195 B1 adds a dormant, production-unreferenced engine whose executor
+accepts only immutable final ledger rows derived from canonical manifests plus
+explicit caller-constructible lifecycle, liveness, and current-boot coverage
+assertion shapes with no permissive defaults. Validation rejects missing,
+malformed, stale-boot, truncated, ambiguous, unsupported-platform,
+recovery/job/live-reference, unavailable, or internally inconsistent values,
+but establishes no provenance or external authority; authoritative producers are
+deferred to B2/B3. It also applies the 60-second newest-mtime floor. It rejects
+Git/worktree/bare-repository ancestor or descendant evidence
+and performs fd-relative no-follow same-device pathname removal after verified
+parent/root identity checks, with complete directory-entry/sibling postconditions
+and exact accounting. Detected pre-action identity mismatches fail with zero
+reclaimed claims. POSIX unlink/rmdir is not inode-bound, so the portable threat
+contract excludes a deliberately hostile same-UID replacement in the final
+identity-check-to-pathname-syscall window and does not promise its preservation.
+No production path imports it; teardown/scheduler wiring, activation, live
+deletion, deployment, and legacy backlog eligibility remain absent.
 Runtime-launched task-agent and job subprocesses instead receive one canonical
 mode-0700 root at
 ``<workspace>/.happyranch/task-tmp/<canonical TASK-N>`` through ``TMPDIR``,
