@@ -222,6 +222,16 @@ def test_real_systemd_uses_plain_shipping_unit_without_af_netlink_ab_arms() -> N
     assert "90-ci-af-netlink.conf" not in harness
 
 
+def test_real_systemd_denial_probe_follows_shipping_state_directory_creation() -> None:
+    harness = Path("app/linux/package/real_systemd_n3.sh").read_text()
+    reset = harness.index('reset_shipping_unit || fail "fresh shipping-unit reset/setup failed"')
+    first_start = harness.index("sudo systemctl start happyranch-managed.target || true", reset)
+    denial_probe = harness.index("capture_denial_matrix shipping-unit", reset)
+    successful_start = harness.index("sudo systemctl start happyranch-managed.target", first_start + 1)
+
+    assert reset < first_start < denial_probe < successful_start
+
+
 def test_real_systemd_denial_matrix_executes_every_bounded_probe() -> None:
     harness = Path("app/linux/package/real_systemd_n3.sh").read_text()
     for probe in ("socket.AF_NETLINK", "socket.SOCK_RAW", "/dev/net/tun", "probe-write", "create_connection"):

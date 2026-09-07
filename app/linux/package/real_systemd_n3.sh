@@ -335,11 +335,6 @@ PY
   sudo systemctl daemon-reload
   printf 'shipping_unit_reset=complete cleanup_complete=true\n' >>"$diagnostics/shipping-unit.log"
 }
-# The denial probe keeps AF_NETLINK explicitly available because the shipping
-# sidecar needs it. Every other sandbox dimension remains measured and
-# fail-closed. The lifecycle proof then starts from a fresh, unmodified package
-# installation with no harness-created AF_NETLINK drop-in.
-capture_denial_matrix shipping-unit
 reset_shipping_unit || fail "fresh shipping-unit reset/setup failed"
 
 # semantic evidence: startup
@@ -360,6 +355,12 @@ diagnostic credential_input input_acquisition systemd happyranch-tsnet-sidecar.s
 sudo systemctl reset-failed happyranch-tsnet-sidecar.service happyranch-connector.service
 wait_for "failed credential staging cleanup" sudo test ! -e /run/credentials/happyranch-tsnet-sidecar.service
 sudo mv /etc/happyranch/enrollment.key.held /etc/happyranch/enrollment.key
+
+# The failed shipping-service start above causes systemd to create the unit's
+# StateDirectory. The denial probe can now retain the shipping unit's exact
+# ReadWritePaths and explicit AF_NETLINK allowance while measuring every other
+# sandbox dimension fail closed, without a harness-created drop-in.
+capture_denial_matrix shipping-unit
 
 sudo systemctl start happyranch-managed.target
 wait_for "connector READY" active happyranch-connector.service
