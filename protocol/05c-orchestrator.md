@@ -1337,11 +1337,15 @@ with no permissive defaults and rejects missing, malformed, stale-boot, truncate
 ambiguous, unsupported-platform, recovery/job/live-reference, unavailable, or
 internally inconsistent values. These inputs are untrusted: B1 neither proves
 their provenance nor supplies authoritative producers; those integrations are
-deferred to B2/B3. Sealing also enforces the 60-second newest-mtime floor. Final
-removal is bound to verified parent/root identity and complete sibling/directory-
-entry postconditions; Git/worktree/bare-repository ancestor or descendant evidence
-fails closed. B1 adds no teardown/scheduler caller, activation, deployment,
-live deletion, or legacy-backlog eligibility.
+deferred to B2/B3. Sealing also enforces the 60-second newest-mtime floor.
+Pathname removal follows verified parent/root identity and complete sibling/
+directory-entry checks; every detected pre-action mismatch fails with zero
+reclaimed claims. Portable POSIX unlink/rmdir is not inode-bound, so B1 excludes
+a deliberately hostile same-UID replacement in the final identity-check-to-
+pathname-syscall window and does not promise that replacement survives.
+Git/worktree/bare-repository ancestor or descendant evidence fails closed. B1
+adds no teardown/scheduler caller, activation, deployment, live deletion, or
+legacy-backlog eligibility.
 
 1. **Measures** the OWNING AGENT's workspace with an explicit bounded,
    fail-open budget: one true wall-clock deadline shared across all

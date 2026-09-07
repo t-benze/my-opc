@@ -1332,8 +1332,12 @@ recovery/job/live-reference, unavailable, or internally inconsistent values,
 but establishes no provenance or external authority; authoritative producers are
 deferred to B2/B3. It also applies the 60-second newest-mtime floor. It rejects
 Git/worktree/bare-repository ancestor or descendant evidence
-and binds fd-relative no-follow same-device final removal to verified parent/root
-identity plus complete directory-entry/sibling postconditions and exact accounting.
+and performs fd-relative no-follow same-device pathname removal after verified
+parent/root identity checks, with complete directory-entry/sibling postconditions
+and exact accounting. Detected pre-action identity mismatches fail with zero
+reclaimed claims. POSIX unlink/rmdir is not inode-bound, so the portable threat
+contract excludes a deliberately hostile same-UID replacement in the final
+identity-check-to-pathname-syscall window and does not promise its preservation.
 No production path imports it; teardown/scheduler wiring, activation, live
 deletion, deployment, and legacy backlog eligibility remain absent.
 Runtime-launched task-agent and job subprocesses instead receive one canonical

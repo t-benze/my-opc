@@ -428,6 +428,14 @@ def _verify_parent_entries(row: LedgerRow, parent_fd: int, *, root_absent: bool)
 
 
 def _remove_dir(fd: int, expected: Mapping[str, FileIdentity], prefix: str, device: int) -> None:
+    """Remove checked entries by name under the portable B1 threat contract.
+
+    The identity checks detect swaps completed before each check.  POSIX
+    unlink/rmdir remain pathname operations, however, so they do not preserve
+    a replacement installed by a deliberately hostile same-UID actor in the
+    final check-to-syscall window.  Later mismatches still fail the row with
+    zero reclaimed accounting; this helper does not claim inode-bound removal.
+    """
     names = sorted(os.listdir(fd))
     direct = sorted(path for path in expected if path and "/" not in path)
     if names != direct:
@@ -453,7 +461,11 @@ def _remove_dir(fd: int, expected: Mapping[str, FileIdentity], prefix: str, devi
 
 
 def execute_ledger(rows: tuple[LedgerRow, ...]) -> tuple[ReclamationResult, ...]:
-    """Consume finalized rows only; each row fails closed and independently."""
+    """Consume finalized rows; detected mismatches fail independently.
+
+    This portable pathname-based executor excludes a deliberately hostile
+    same-UID replacement in the final identity-check-to-unlink/rmdir window.
+    """
     results: list[ReclamationResult] = []
     seen: set[str] = set()
     for row in rows:

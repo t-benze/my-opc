@@ -403,6 +403,53 @@ def test_final_root_rename_recreate_cannot_report_completed(monkeypatch, tmp_pat
     assert renamed.exists()
 
 
+@pytest.mark.parametrize("entry_kind", ["file", "directory"])
+def test_final_pathname_swap_is_characterized_without_false_success(
+        entry_kind, monkeypatch, tmp_path):
+    """Portable unlink/rmdir is name-bound, not inode-bound.
+
+    A hostile same-UID replacement in the final syscall window is deliberately
+    outside the threat contract.  Once the displaced ledger entry makes the
+    mismatch detectable, the row must still fail with zero reclaimed claims.
+    """
+    workspace, contract, evidence, old = _candidate(tmp_path)
+    row = seal_ledger_row(workspace=workspace, task_id="TASK-1", assertions=evidence,
+                          now_ns=old + 121_000_000_000)
+    nested = contract.root / "nested"
+
+    if entry_kind == "file":
+        original_action = os.unlink
+        original = nested / "file"
+        displaced = nested / "displaced-file"
+
+        def hostile_action(path, *args, **kwargs):
+            if path == "file" and kwargs.get("dir_fd") is not None:
+                original.rename(displaced)
+                original.write_bytes(b"hostile replacement")
+            return original_action(path, *args, **kwargs)
+
+        monkeypatch.setattr(os, "unlink", hostile_action)
+    else:
+        original_action = os.rmdir
+        displaced = contract.root / "displaced-directory"
+
+        def hostile_action(path, *args, **kwargs):
+            if path == "nested" and kwargs.get("dir_fd") is not None:
+                nested.rename(displaced)
+                nested.mkdir()
+            return original_action(path, *args, **kwargs)
+
+        monkeypatch.setattr(os, "rmdir", hostile_action)
+
+    result, = execute_ledger((row,))
+    assert result.outcome == "failed"
+    assert result.reclaimed_bytes == result.reclaimed_inodes == 0
+    assert displaced.exists()
+    # The same-name replacement can be removed by the final pathname syscall;
+    # its survival is intentionally not promised by the portable contract.
+    assert not (nested / "file" if entry_kind == "file" else nested).exists()
+
+
 def test_concurrent_finalizers_yield_one_completion_and_one_failure(tmp_path):
     workspace, _, evidence, old = _candidate(tmp_path)
     row = seal_ledger_row(workspace=workspace, task_id="TASK-1", assertions=evidence,
