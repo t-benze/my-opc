@@ -209,307 +209,17 @@ def test_real_systemd_missing_credential_accepts_null_peer_map_as_no_identity() 
     assert '(d.get("Peer") or {}).values()' in harness
 
 
-def test_real_systemd_af_netlink_acceptance_is_four_arm_fail_closed() -> None:
+def test_real_systemd_uses_plain_shipping_unit_without_af_netlink_ab_arms() -> None:
     harness = Path("app/linux/package/real_systemd_n3.sh").read_text()
-    arms = [
-        "ordering-a-control:A:control", "ordering-a-candidate:A:candidate",
-        "ordering-b-candidate:B:candidate", "ordering-b-control:B:control",
-    ]
-    assert 'RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK' in harness
-    assert '90-ci-af-netlink.conf' in harness
-    assert "acceptance_arms=(" in harness
-    assert all(arm in harness for arm in arms)
-    assert 'preauthkeys create --user ci --reusable=false' in harness
-    assert '--control-category engine_start --control-phase engine_initialization' in harness
-    assert 'arm_result_args=(--ready)' in harness
-    assert 'arm_result_args+=(--expected-peer-visible)' in harness
-    assert 'arm_result_args+=(--virtual-listener-reachable)' in harness
-    assert 'capture_denial_matrix' in harness
-    assert 'address_family_netlink' in harness
-    assert 'linux_capabilities' in harness
-    assert 'device_access' in harness
-    assert 'writable_paths' in harness
-    assert 'control_plane_operations' in harness
-    assert 'sudo systemctl daemon-reload' in harness
-    assert 'cleanup_complete' in harness
-    assert 'host port 443' not in harness.lower()
-
-
-def test_real_systemd_candidate_expected_peer_is_production_observed() -> None:
-    harness = Path("app/linux/package/real_systemd_n3.sh").read_text()
-    assert 'production_expected_peer_visible=0' in harness
-    assert 'test ! -e /var/lib/happyranch-tsnet-sidecar/credential.consumed' in harness
-    assert 'test -f /var/lib/happyranch-tsnet-sidecar/credential.consumed' in harness
-    assert '(( production_expected_peer_visible == 1 ))' in harness
-    assert 'arm_result_args=(--ready --expected-peer-visible' not in harness
-
-
-def test_real_systemd_control_receipts_are_current_arm_exactly_once() -> None:
-    harness = Path("app/linux/package/real_systemd_n3.sh").read_text()
-    assert 'journalctl -n 0 --show-cursor' in harness
-    assert 'journalctl -u happyranch-tsnet-sidecar.service -n 0 --show-cursor' not in harness
-    assert '--after-cursor="$cursor"' in harness
-    assert '--output-fields=MESSAGE,_SYSTEMD_INVOCATION_ID' in harness
-    assert 'systemctl_property "$unit" InvocationID' in harness
-    assert 'current_control_terminal_evidence' in harness
-    assert 'settle_control_terminal_invocation' in harness
-    capture = harness.index('capture_control_terminal_snapshot()')
-    pin = harness.index('invocation="$(systemctl_property', capture)
-    stop = harness.index('sudo systemctl stop "$unit"', pin)
-    receipt = harness.index('current_control_terminal_evidence "$cursor"', stop)
-    snapshot = harness.index("printf '%s\\n' \"$terminal_evidence\"", receipt)
-    reset = harness.index('sudo systemctl reset-failed "$unit"', snapshot)
-    assert pin < stop < receipt < snapshot < reset
-    assert '"$run_id:$arm_id:engine_start"' in harness
-
-
-def _run_control_terminal_evidence(
-    tmp_path: Path,
-    journal: str,
-    *,
-    invocation: str = "a" * 32,
-    result: str = "exit-code",
-    exec_main_status: str = "1",
-) -> subprocess.CompletedProcess[str]:
-    harness = Path("app/linux/package/real_systemd_n3.sh").read_text()
-    helper = "current_control_terminal_evidence() {" + harness.split("current_control_terminal_evidence() {", 1)[1].split("\nsystemctl_absent_value() {", 1)[0]
-    fake_bin = tmp_path / "bin"; fake_bin.mkdir(exist_ok=True)
-    (fake_bin / "sudo").write_text("#!/bin/bash\nexec \"$@\"\n")
-    (fake_bin / "journalctl").write_text("""#!/bin/bash
-[[ " $* " == *" --after-cursor=cursor-1 "* ]] || exit 9
-[[ " $* " != *" -u "* ]] || exit 9
-printf '%s\n' "$FAKE_JOURNAL"
-""")
-    for executable in fake_bin.iterdir(): executable.chmod(0o700)
-    script = f'''set -euo pipefail
-{helper}
-current_control_terminal_evidence cursor-1 {invocation} {result} {exec_main_status}
-'''
-    return subprocess.run(
-        ["bash", "-c", script], capture_output=True, text=True, check=False,
-        env=os.environ | {"PATH": f"{fake_bin}:{os.environ['PATH']}", "FAKE_JOURNAL": journal},
-    )
-
-
-def _qualify_control_terminal_evidence(evidence: str) -> subprocess.CompletedProcess[str]:
-    harness = Path("app/linux/package/real_systemd_n3.sh").read_text()
-    helper = "control_terminal_evidence_qualifies() {" + harness.split("control_terminal_evidence_qualifies() {", 1)[1].split("\nsystemctl_absent_value() {", 1)[0]
-    return subprocess.run(
-        ["bash", "-c", f"set -euo pipefail\n{helper}\ncontrol_terminal_evidence_qualifies"],
-        input=evidence, capture_output=True, text=True, check=False,
-    )
-
-
-def _journal_entry(invocation: str, receipt: dict[str, object]) -> str:
-    return json.dumps({"_SYSTEMD_INVOCATION_ID": invocation, "MESSAGE": "diagnostic_receipt=" + json.dumps(receipt)})
-
-
-def _control_receipt(**changes: object) -> dict[str, object]:
-    receipt: dict[str, object] = {
-        "category": "engine_start", "phase": "engine_initialization",
-        "actor": "tsnet-sidecar", "unit": "happyranch-tsnet-sidecar.service",
-        "outcome": "failed", "terminal": True, "assertion": {"status": "completed"},
-    }
-    receipt.update(changes)
-    return receipt
-
-
-def test_real_systemd_control_receipt_accepts_one_current_arm_and_redacts_output(tmp_path: Path) -> None:
-    invocation = "a" * 32
-    result = _run_control_terminal_evidence(tmp_path, _journal_entry(invocation, _control_receipt()), invocation=invocation)
-    assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout) == {
-        "pinned_invocation": {
-            "categories": ["engine_start"],
-            "category_counts": {"credential_input": 0, "durable_commit": 0, "engine_start": 1, "network_join": 0},
-            "cardinality": "one",
-            "qualifying_receipt_count": 1,
-            "receipt_count": 1,
-        },
-        "systemd": {"exec_main_status": 1, "result": "exit-code"},
-        "window": {
-            "categories": ["engine_start"],
-            "category_counts": {"credential_input": 0, "durable_commit": 0, "engine_start": 1, "network_join": 0},
-            "receipt_count": 1,
-        },
-    }
-
-
-@pytest.mark.parametrize("count", [0, 1, 2])
-def test_real_systemd_control_evidence_distinguishes_receipt_cardinality(tmp_path: Path, count: int) -> None:
-    journal = "\n".join(_journal_entry("a" * 32, _control_receipt()) for _ in range(count))
-    result = _run_control_terminal_evidence(tmp_path, journal)
-    assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout)["pinned_invocation"]["qualifying_receipt_count"] == count
-    assert (_qualify_control_terminal_evidence(result.stdout).returncode == 0) == (count == 1)
-
-
-def test_real_systemd_control_evidence_separates_wrong_or_stale_invocations(tmp_path: Path) -> None:
-    journal = "\n".join([
-        _journal_entry("b" * 32, _control_receipt()),
-        _journal_entry("a" * 32, _control_receipt()),
-    ])
-    result = _run_control_terminal_evidence(tmp_path, journal)
-    assert result.returncode == 0, result.stderr
-    evidence = json.loads(result.stdout)
-    assert evidence["pinned_invocation"]["receipt_count"] == 1
-    assert evidence["window"]["receipt_count"] == 2
-    assert _qualify_control_terminal_evidence(result.stdout).returncode == 0
-
-    stale_only = _run_control_terminal_evidence(tmp_path, _journal_entry("b" * 32, _control_receipt()))
-    assert stale_only.returncode == 0
-    assert _qualify_control_terminal_evidence(stale_only.stdout).returncode != 0
-
-
-@pytest.mark.parametrize("cursor_output,expected_rc", [
-    ("-- cursor: current-arm-cursor", 0),
-    ("", 1),
-    ("-- cursor: stale\n-- cursor: current", 1),
-])
-def test_real_systemd_current_arm_cursor_is_unfiltered_and_exactly_one(tmp_path: Path, cursor_output: str, expected_rc: int) -> None:
-    harness = Path("app/linux/package/real_systemd_n3.sh").read_text()
-    helper = "current_journal_cursor() {" + harness.split("current_journal_cursor() {", 1)[1].split("\nsystemctl_property() {", 1)[0]
-    fake_bin = tmp_path / "bin"; fake_bin.mkdir()
-    (fake_bin / "sudo").write_text("#!/bin/bash\nexec \"$@\"\n")
-    (fake_bin / "journalctl").write_text("""#!/bin/bash
-[[ " $* " == *" -n 0 "* && " $* " == *" --show-cursor "* ]] || exit 9
-[[ " $* " != *" -u "* ]] || exit 9
-printf '%s\n' "$FAKE_CURSOR"
-""")
-    for executable in fake_bin.iterdir(): executable.chmod(0o700)
-    result = subprocess.run(
-        ["bash", "-c", f"set -euo pipefail\n{helper}\ncurrent_journal_cursor"],
-        capture_output=True, text=True, check=False,
-        env=os.environ | {"PATH": f"{fake_bin}:{os.environ['PATH']}", "FAKE_CURSOR": cursor_output},
-    )
-    assert (result.returncode == 0) == (expected_rc == 0)
-
-
-@pytest.mark.parametrize("journal", [
-    _journal_entry("a" * 32, _control_receipt(secret="credential=do-not-emit")),
-    _journal_entry("b" * 32, _control_receipt(secret="credential=do-not-emit")),
-])
-def test_real_systemd_control_receipt_rejects_secret_bearing_input_and_output(tmp_path: Path, journal: str) -> None:
-    result = _run_control_terminal_evidence(tmp_path, journal)
-    assert result.returncode != 0
-    assert "do-not-emit" not in result.stdout + result.stderr
-
-
-@pytest.mark.parametrize("result_value,status", [
-    ("", "1"), ("exit-code\nfailed", "1"), ("credential=do-not-emit", "1"),
-    ("exit-code", ""), ("exit-code", "1\n2"), ("exit-code", "256"),
-])
-def test_real_systemd_control_evidence_rejects_missing_or_ambiguous_properties(
-    tmp_path: Path, result_value: str, status: str,
-) -> None:
-    result = _run_control_terminal_evidence(
-        tmp_path, _journal_entry("a" * 32, _control_receipt()), result=result_value, exec_main_status=status,
-    )
-    assert result.returncode != 0
-    assert "do-not-emit" not in result.stdout + result.stderr
-
-
-def _run_control_snapshot_lifecycle(
-    tmp_path: Path,
-    journal: str,
-    *,
-    invocation: str = "a" * 32,
-    result: str = "exit-code",
-    exec_main_status: str = "1",
-    fail_on: str = "",
-) -> subprocess.CompletedProcess[str]:
-    harness = Path("app/linux/package/real_systemd_n3.sh").read_text()
-    helpers = "systemctl_property() {" + harness.split("systemctl_property() {", 1)[1].split("\nsystemctl_absent_value() {", 1)[0]
-    fake_bin = tmp_path / "bin"; fake_bin.mkdir()
-    (fake_bin / "sudo").write_text("#!/bin/bash\nexec \"$@\"\n")
-    (fake_bin / "systemctl").write_text("""#!/bin/bash
-printf '%s\\n' "$*" >>"$CALL_LOG"
-[[ "${FAIL_ON:-}" != "$1" ]] || exit 7
-case "$*" in
-  "show happyranch-tsnet-sidecar.service -p InvocationID --value") printf '%s\\n' "$FAKE_INVOCATION" ;;
-  "show happyranch-tsnet-sidecar.service -p Result --value") printf '%s\\n' "$FAKE_RESULT" ;;
-  "show happyranch-tsnet-sidecar.service -p ExecMainStatus --value") printf '%s\\n' "$FAKE_STATUS" ;;
-  "reset-failed happyranch-tsnet-sidecar.service") rm -f "$OBSERVABILITY" ;;
-esac
-""")
-    (fake_bin / "journalctl").write_text("""#!/bin/bash
-[[ -e "$OBSERVABILITY" ]] || exit 8
-printf '%s\n' "$FAKE_JOURNAL"
-""")
-    for executable in fake_bin.iterdir(): executable.chmod(0o700)
-    observable = tmp_path / "unit-observability"; observable.write_text("present")
-    snapshot = tmp_path / "control-snapshot.json"
-    script = f"set -euo pipefail\n{helpers}\ncapture_control_terminal_snapshot cursor-1 \"$SNAPSHOT\"\ncat \"$SNAPSHOT\""
-    env = os.environ | {
-        "PATH": f"{fake_bin}:{os.environ['PATH']}", "CALL_LOG": str(tmp_path / "calls"),
-        "OBSERVABILITY": str(observable), "SNAPSHOT": str(snapshot), "FAKE_JOURNAL": journal,
-        "FAKE_INVOCATION": invocation, "FAKE_RESULT": result, "FAKE_STATUS": exec_main_status,
-        "FAIL_ON": fail_on,
-    }
-    return subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False, env=env)
-
-
-def test_real_systemd_control_snapshot_precedes_observability_destroying_reset(tmp_path: Path) -> None:
-    invocation = "a" * 32
-    ok = _run_control_snapshot_lifecycle(tmp_path, _journal_entry(invocation, _control_receipt()))
-    assert ok.returncode == 0, ok.stderr
-    assert (tmp_path / "calls").read_text().splitlines() == [
-        "show happyranch-tsnet-sidecar.service -p InvocationID --value",
-        "stop happyranch-tsnet-sidecar.service",
-        "show happyranch-tsnet-sidecar.service -p Result --value",
-        "show happyranch-tsnet-sidecar.service -p ExecMainStatus --value",
-        "reset-failed happyranch-tsnet-sidecar.service",
-    ]
-    assert json.loads(ok.stdout)["pinned_invocation"]["receipt_count"] == 1
-    assert not (tmp_path / "unit-observability").exists()
-
-
-@pytest.mark.parametrize("count", [0, 2])
-def test_real_systemd_control_snapshot_rejects_non_exact_receipt_cardinality(tmp_path: Path, count: int) -> None:
-    journal = "\n".join(_journal_entry("a" * 32, _control_receipt()) for _ in range(count))
-    assert _run_control_snapshot_lifecycle(tmp_path, journal).returncode != 0
-
-
-def test_real_systemd_control_snapshot_rejects_wrong_or_stale_invocation_and_secrets(tmp_path: Path) -> None:
-    wrong = _journal_entry("b" * 32, _control_receipt())
-    wrong_path = tmp_path / "wrong"; wrong_path.mkdir()
-    assert _run_control_snapshot_lifecycle(wrong_path, wrong).returncode != 0
-    secret = _journal_entry("a" * 32, _control_receipt(secret="credential=do-not-emit"))
-    secret_path = tmp_path / "secret"; secret_path.mkdir()
-    rejected = _run_control_snapshot_lifecycle(secret_path, secret)
-    assert rejected.returncode != 0
-    assert "do-not-emit" not in rejected.stdout + rejected.stderr
-
-
-@pytest.mark.parametrize("invocation", ["", "a" * 31, "a" * 32 + "\nb" * 32])
-def test_real_systemd_control_snapshot_rejects_missing_or_ambiguous_invocation(
-    tmp_path: Path, invocation: str,
-) -> None:
-    journal = _journal_entry("a" * 32, _control_receipt())
-    assert _run_control_snapshot_lifecycle(tmp_path, journal, invocation=invocation).returncode != 0
-
-
-@pytest.mark.parametrize("result_value,status", [("", "1"), ("exit-code\nfailed", "1"), ("exit-code", ""), ("exit-code", "1\n2")])
-def test_real_systemd_control_snapshot_rejects_ambiguous_properties(
-    tmp_path: Path, result_value: str, status: str,
-) -> None:
-    journal = _journal_entry("a" * 32, _control_receipt())
-    assert _run_control_snapshot_lifecycle(tmp_path, journal, result=result_value, exec_main_status=status).returncode != 0
-
-
-def test_real_systemd_control_snapshot_is_reusable_after_cleanup(tmp_path: Path) -> None:
-    journal = _journal_entry("a" * 32, _control_receipt())
-    result = _run_control_snapshot_lifecycle(tmp_path, journal)
-    assert result.returncode == 0, result.stderr
-    assert _qualify_control_terminal_evidence(result.stdout).returncode == 0
-
-
-def test_real_systemd_control_snapshot_fails_closed_on_stop_or_reset(tmp_path: Path) -> None:
-    journal = _journal_entry("a" * 32, _control_receipt())
-    for failed_command in ("stop", "reset-failed"):
-        case_path = tmp_path / failed_command; case_path.mkdir()
-        failed = _run_control_snapshot_lifecycle(case_path, journal, fail_on=failed_command)
-        assert failed.returncode != 0
+    assert "acceptance_arms" not in harness
+    assert "ordering-a-control" not in harness
+    assert "ordering-a-candidate" not in harness
+    assert "ordering-b-candidate" not in harness
+    assert "ordering-b-control" not in harness
+    assert "reset_shipping_unit" in harness
+    assert "capture_denial_matrix shipping-unit" in harness
+    assert "RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK" in harness
+    assert "90-ci-af-netlink.conf" not in harness
 
 
 def test_real_systemd_denial_matrix_executes_every_bounded_probe() -> None:
@@ -523,161 +233,10 @@ def test_real_systemd_denial_matrix_executes_every_bounded_probe() -> None:
         assert sandbox_property in harness
 
 
-def test_real_systemd_candidate_failures_preserve_settled_terminal_evidence() -> None:
-    harness = Path("app/linux/package/real_systemd_n3.sh").read_text()
-    assert "preserve_candidate_failure()" in harness
-    assert 'current_acceptance_variant="$variant"' in harness
-    assert 'candidate_failure_phase=ready' in harness
-    assert 'candidate_failure_phase=expected_peers' in harness
-    assert 'candidate_failure_phase=listener' in harness
-    assert 'candidate_failure_phase=assertion' in harness
-    assert 'candidate_failure_phase=cleanup' in harness
-    assert 'validate-candidate-terminal' in harness
-    assert 'candidate-terminal-evidence.json' in harness
-    fail_body = harness.split("fail() {", 1)[1].split("\n}", 1)[0]
-    assert "preserve_candidate_failure" in fail_body
-    preserve = harness.split("preserve_candidate_failure() {", 1)[1].split("\n}", 1)[0]
-    assert "capture_candidate_snapshot" in preserve
-    snapshot = harness.split("capture_candidate_snapshot() {", 1)[1].split("\narm_cleanup() {", 1)[0]
-    assert "capture_denial_matrix" in snapshot
-    assert "settle_terminal_invocation" in snapshot
-    assert "current_terminal_evidence" in snapshot
-    assert snapshot.index("capture_denial_matrix") < snapshot.index("settle_terminal_invocation")
-
-
-def test_real_systemd_candidate_failure_preservation_covers_both_arms_and_all_exits() -> None:
-    harness = Path("app/linux/package/real_systemd_n3.sh").read_text()
-    for arm in ("ordering-a-candidate", "ordering-b-candidate"):
-        assert arm in harness
-    for phase in ("pre_cursor", "pre_reset", "setup_start", "ready", "expected_peers", "listener", "denial_matrix", "assertion", "cleanup", "post_cleanup_assertion"):
-        assert f"candidate_failure_phase={phase}" in harness
-    assert 'candidate_failure_preserved=1' in harness
-    assert '[[ "$current_acceptance_variant" == candidate' in harness
-
-
-@pytest.mark.parametrize("arm", ["ordering-a-candidate", "ordering-b-candidate"])
-@pytest.mark.parametrize("phase", [
-    "pre_cursor", "pre_reset", "setup_start", "ready", "expected_peers", "listener",
-    "denial_matrix", "assertion", "cleanup", "post_cleanup_assertion",
-])
-def test_real_systemd_fault_hook_executes_every_candidate_boundary(arm: str, phase: str) -> None:
-    harness = Path("app/linux/package/real_systemd_n3.sh").read_text()
-    helper = "candidate_boundary() {" + harness.split("candidate_boundary() {", 1)[1].split("\nport_open()", 1)[0]
-    result = subprocess.run(
-        ["bash", "-c", f"set -euo pipefail\n{helper}\ncurrent_acceptance_arm={arm}\ncandidate_boundary {phase}"],
-        capture_output=True, text=True, check=False,
-        env=os.environ | {"N3_FAULT_PHASE": phase},
-    )
-    assert result.returncode != 0
-
-
-def test_real_systemd_snapshot_is_captured_before_destructive_cleanup() -> None:
-    harness = Path("app/linux/package/real_systemd_n3.sh").read_text()
-    loop = harness.split('for arm_spec in "${acceptance_arms[@]}"; do', 1)[1].split("\n# Restore one fresh candidate fixture", 1)[0]
-    assert loop.index("capture_candidate_snapshot") < loop.index('arm_cleanup || fail')
-    assert loop.index('candidate_failure_phase=post_cleanup_assertion') > loop.index('arm_cleanup || fail')
-    preserve = harness.split("preserve_candidate_failure() {", 1)[1].split("\nwrite_candidate_preservation_failure() {", 1)[0]
-    assert preserve.index('[[ ! -s "$candidate_snapshot_path" ]]') < preserve.index('validate-candidate-terminal')
-
-
-@pytest.mark.parametrize("arm", ["ordering-a-candidate", "ordering-b-candidate"])
-@pytest.mark.parametrize("phase", [
-    "pre_cursor", "pre_reset", "setup_start", "ready", "expected_peers", "listener",
-    "denial_matrix", "assertion", "cleanup", "post_cleanup_assertion",
-])
-def test_real_fail_lifecycle_preserves_then_cleans_every_candidate_boundary(tmp_path: Path, arm: str, phase: str) -> None:
-    harness = Path("app/linux/package/real_systemd_n3.sh").read_text()
-    fail_helper = "fail() {" + harness.split("fail() {", 1)[1].split("\nwait_for() {", 1)[0]
-    log = tmp_path / "lifecycle.log"
-    script = f'''set -euo pipefail
-current_acceptance_arm={arm}
-current_acceptance_variant=candidate
-candidate_failure_phase={phase}
-candidate_failure_preserved=0
-candidate_failure_preserving=0
-preserve_candidate_failure() {{ printf 'preserve:%s:%s\n' "$current_acceptance_arm" "$candidate_failure_phase" >>"$LIFECYCLE_LOG"; candidate_failure_preserved=1; }}
-arm_cleanup() {{ printf 'cleanup:%s:%s\n' "$current_acceptance_arm" "$candidate_failure_phase" >>"$LIFECYCLE_LOG"; }}
-{fail_helper}
-fail injected
-'''
-    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False,
-                            env=os.environ | {"LIFECYCLE_LOG": str(log)})
-    assert result.returncode == 1
-    assert log.read_text().splitlines() == [f"preserve:{arm}:{phase}", f"cleanup:{arm}:{phase}"]
-
-
-@pytest.mark.parametrize("arm", ["ordering-a-candidate", "ordering-b-candidate"])
-@pytest.mark.parametrize("phase", ["cleanup", "post_cleanup_assertion"])
-def test_real_preserver_uses_settled_snapshot_after_observability_is_destroyed(tmp_path: Path, arm: str, phase: str) -> None:
-    harness = Path("app/linux/package/real_systemd_n3.sh").read_text()
-    helpers = "preserve_candidate_failure() {" + harness.split("preserve_candidate_failure() {", 1)[1].split("\narm_cleanup() {", 1)[0]
-    diagnostics = tmp_path / "diagnostics"; diagnostics.mkdir()
-    counts = {"credential_input": 0, "engine_start": 1, "network_join": 0, "durable_commit": 0}
-    snapshot = {
-        "pinned_invocation": {"categories": ["engine_start"], "category_counts": counts,
-                              "receipt_count": 1, "qualifying_receipt_count": 1, "cardinality": "one"},
-        "window": {"categories": ["engine_start"], "category_counts": counts, "receipt_count": 1},
-        "systemd": {"result": "exit-code", "exec_main_status": 1},
-    }
-    denial = {"schema": "happyranch.n3.sandbox-denial-matrix", "version": 1, "arm_id": arm,
-              "operations": [{"id": operation, "measured": True, "result": "allow", "category": "none", "errno": None}
-                             for operation in ("address_family_netlink", "linux_capabilities", "device_access",
-                                               "writable_paths", "control_plane_operations")]}
-    snapshot_path = diagnostics / f"{arm}-candidate-settled-snapshot.json"
-    snapshot_path.write_text(json.dumps({"terminal_evidence": snapshot, "denial_matrix": denial}))
-    script = f'''set -euo pipefail
-current_acceptance_arm={arm}; candidate_failure_phase={phase}; candidate_failure_preserving=0; candidate_failure_preserved=0
-arm_journal_cursor=fresh; candidate_snapshot_path="$SNAPSHOT"; diagnostics="$DIAGNOSTICS"; evidence_driver="$DRIVER"
-capture_candidate_snapshot() {{ echo should-not-observe >&2; return 99; }}
-{helpers}
-rm -f "$OBSERVABILITY"
-preserve_candidate_failure
-'''
-    observable = tmp_path / "unit.properties"; observable.write_text("present")
-    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False, env=os.environ | {
-        "SNAPSHOT": str(snapshot_path), "DIAGNOSTICS": str(diagnostics),
-        "DRIVER": str(Path("app/linux/package/n3_evidence.py").resolve()), "OBSERVABILITY": str(observable),
-    })
-    assert result.returncode == 0, result.stderr
-    assert "should-not-observe" not in result.stderr
-    terminal = json.loads((diagnostics / f"{arm}-candidate-terminal-evidence.json").read_text())
-    assert terminal["arm_id"] == arm and terminal["phase"] == phase
-
-
-@pytest.mark.parametrize("cursor,started,phase,code", [
-    ("", "0", "pre_cursor", "cursor_unavailable"),
-    ("stale-prior-arm-cursor", "0", "pre_reset", "invocation_unavailable"),
-])
-def test_real_preserver_never_consumes_empty_or_stale_pre_arm_state(
-    tmp_path: Path, cursor: str, started: str, phase: str, code: str,
-) -> None:
-    harness = Path("app/linux/package/real_systemd_n3.sh").read_text()
-    helpers = "preserve_candidate_failure() {" + harness.split("preserve_candidate_failure() {", 1)[1].split("\narm_cleanup() {", 1)[0]
-    diagnostics = tmp_path / "diagnostics"; diagnostics.mkdir()
-    script = f'''set -euo pipefail
-current_acceptance_arm=ordering-a-candidate; candidate_failure_phase={phase}
-candidate_failure_preserving=0; candidate_failure_preserved=0; candidate_invocation_started={started}
-arm_journal_cursor={cursor!r}; candidate_snapshot_path="$DIAGNOSTICS/missing"; diagnostics="$DIAGNOSTICS"; evidence_driver="$DRIVER"
-capture_candidate_snapshot() {{ echo stale-consumed >>"$CALL_LOG"; return 0; }}
-{helpers}
-preserve_candidate_failure
-'''
-    call_log = tmp_path / "calls"
-    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False, env=os.environ | {
-        "DIAGNOSTICS": str(diagnostics), "DRIVER": str(Path("app/linux/package/n3_evidence.py").resolve()),
-        "CALL_LOG": str(call_log),
-    })
-    assert result.returncode != 0
-    assert not call_log.exists()
-    record = json.loads((diagnostics / "ordering-a-candidate-candidate-preservation-failure.json").read_text())
-    assert record == {"schema": "happyranch.n3.candidate-preservation-failure", "version": 1,
-                      "arm_id": "ordering-a-candidate", "phase": phase, "failure_code": code}
-
-
-def _run_real_systemd_arm_cleanup(tmp_path: Path, **env: str) -> subprocess.CompletedProcess[str]:
+def _run_real_systemd_shipping_cleanup(tmp_path: Path, **env: str) -> subprocess.CompletedProcess[str]:
     harness = Path("app/linux/package/real_systemd_n3.sh").read_text()
     unit_helpers = "systemctl_absent_value() {" + harness.split("systemctl_absent_value() {", 1)[1].split("\ndiagnostics=", 1)[0]
-    cleanup = harness.split("arm_cleanup() {", 1)[1].split("\n}\narm_reset()", 1)[0]
+    cleanup = harness.split("shipping_cleanup() {", 1)[1].split("\n}\nreset_shipping_unit()", 1)[0]
     fake_bin = tmp_path / "bin"; fake_bin.mkdir()
     (fake_bin / "systemctl").write_text("""#!/bin/bash
 if [[ $1 == show ]]; then p=$4; case $p in LoadState) v=${LOAD_STATE-not-found}; s=${LOAD_RC:-4};; ActiveState) v=${ACTIVE_STATE-inactive}; s=${ACTIVE_RC:-4};; SubState) v=${SUB_STATE-dead}; s=${SUB_RC:-4};; MainPID) v=${MAIN_PID-0}; s=${PID_RC:-4};; esac; printf '%s\\n' "$v"; exit "$s"; fi
@@ -699,18 +258,18 @@ port_open() {{ [[ ${{PORT_RESIDUE:-0}} == 1 ]]; }}
 tsnet_open() {{ [[ ${{LISTENER_RESIDUE:-0}} == 1 ]]; }}
 {unit_helpers}
 work={work!s}; diagnostics={tmp_path!s}
-arm_cleanup() {{
+shipping_cleanup() {{
 {cleanup}
 }}
-arm_cleanup
+shipping_cleanup
 """
     run_env = os.environ | {"PATH": f"{fake_bin}:{os.environ['PATH']}", "N3_RESIDUE_ROOT": str(tmp_path), "N3_UNIT_ROOT": str(tmp_path)} | env
     return subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=run_env, check=False)
 
 
 @pytest.mark.parametrize("exit_codes", [(0, 0, 0, 0), (1, 1, 1, 1), (4, 0, 1, 4)])
-def test_real_systemd_arm_cleanup_accepts_recognized_absent_exit_orderings(tmp_path: Path, exit_codes: tuple[int, int, int, int]) -> None:
-    result = _run_real_systemd_arm_cleanup(tmp_path, **dict(zip(("LOAD_RC", "ACTIVE_RC", "SUB_RC", "PID_RC"), map(str, exit_codes), strict=True)))
+def test_real_systemd_shipping_cleanup_accepts_recognized_absent_exit_orderings(tmp_path: Path, exit_codes: tuple[int, int, int, int]) -> None:
+    result = _run_real_systemd_shipping_cleanup(tmp_path, **dict(zip(("LOAD_RC", "ACTIVE_RC", "SUB_RC", "PID_RC"), map(str, exit_codes), strict=True)))
     assert result.returncode == 0, result.stderr
 
 
@@ -721,8 +280,8 @@ def test_real_systemd_arm_cleanup_accepts_recognized_absent_exit_orderings(tmp_p
     {"UNIT_LIST_RESIDUE": "1"}, {"PROCESS_RESIDUE": "1"}, {"PORT_RESIDUE": "1"},
     {"LISTENER_RESIDUE": "1"}, {"FIXTURE_RESIDUE": "1"},
 ])
-def test_real_systemd_arm_cleanup_rejects_query_and_probe_residue(tmp_path: Path, env: dict[str, str]) -> None:
-    assert _run_real_systemd_arm_cleanup(tmp_path, **env).returncode != 0
+def test_real_systemd_shipping_cleanup_rejects_query_and_probe_residue(tmp_path: Path, env: dict[str, str]) -> None:
+    assert _run_real_systemd_shipping_cleanup(tmp_path, **env).returncode != 0
 
 
 @pytest.mark.parametrize("residue", [
@@ -732,11 +291,11 @@ def test_real_systemd_arm_cleanup_rejects_query_and_probe_residue(tmp_path: Path
     "run/happyranch-tsnet-sidecar", "var/log/happyranch-connector", ".happyranch-stage-leftover",
     ".happyranch-tmp-leftover",
 ])
-def test_real_systemd_arm_cleanup_rejects_every_filesystem_residue_class(tmp_path: Path, residue: str) -> None:
+def test_real_systemd_shipping_cleanup_rejects_every_filesystem_residue_class(tmp_path: Path, residue: str) -> None:
     path = tmp_path / residue
     path.parent.mkdir(parents=True, exist_ok=True)
     path.mkdir() if "." not in path.name else path.write_text("residue")
-    assert _run_real_systemd_arm_cleanup(tmp_path).returncode != 0
+    assert _run_real_systemd_shipping_cleanup(tmp_path).returncode != 0
 
 
 def test_composite_service_manager_executes_start_ready_stop_crash_restart() -> None:

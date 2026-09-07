@@ -1417,12 +1417,11 @@ def test_n3_lifecycle_matrix_covers_shipping_package_boundaries() -> None:
     _assert_n3_lifecycle_evidence(topology["n3_lifecycle_matrix"])
     assert topology["delivery_status"]["n3"].startswith("linux_package")
     assert topology["n3_acceptance_harness"] == {
-        "status": "evidence_only_no_production_authority",
-        "candidate_delta": "transient_sidecar_AF_NETLINK_dropin",
-        "arms": ["ordering-a-control", "ordering-a-candidate", "ordering-b-candidate", "ordering-b-control"],
-        "candidate_required_gates": ["systemd_composite_ready", "production_expected_peer_visible", "virtual_tsnet_listener_reachable"],
-        "control_result": "engine_start/engine_initialization",
-        "per_arm_full_reset": True, "per_arm_cleanup_complete": True, "order_bias_fails_proof": True,
+        "status": "shipping_unit_exact_head_proof",
+        "unit_source": "fresh_plain_generated_shipping_unit",
+        "af_netlink_dropin_absent": True,
+        "denial_matrix_arm": "shipping-unit",
+        "denial_matrix_address_families": "AF_INET AF_INET6 AF_UNIX AF_NETLINK",
     }
 
 

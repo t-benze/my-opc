@@ -8,21 +8,8 @@ TAILSCALE_VERSION=1.102.3
 TAILSCALE_SHA256=36ddd9b51be57ffc2990cf76323cfa13643bfbb1b8a969f6183fa164741cdef5
 readonly HEADSCALE_VERSION HEADSCALE_SHA256 TAILSCALE_VERSION TAILSCALE_SHA256
 
-current_acceptance_arm=""; current_acceptance_variant=""; candidate_failure_phase=""
-candidate_failure_preserved=0; candidate_failure_preserving=0; arm_journal_cursor=""
-candidate_snapshot_path=""; candidate_preservation_failure_path=""
-candidate_invocation_started=0
 fail() {
   local message="$1"
-  local preservation_ok=1
-  if [[ "$current_acceptance_variant" == candidate && "$candidate_failure_preserved" == 0 && "$candidate_failure_preserving" == 0 ]] && declare -F preserve_candidate_failure >/dev/null; then
-    preserve_candidate_failure || preservation_ok=0
-    if declare -F arm_cleanup >/dev/null; then
-      candidate_failure_preserving=1
-      arm_cleanup || true
-    fi
-  fi
-  (( preservation_ok == 1 )) || echo "n3-real-systemd: candidate terminal evidence preservation failed closed" >&2
   echo "n3-real-systemd: $message" >&2
   exit 1
 }
@@ -31,11 +18,6 @@ wait_for() {
   for _attempt in $(seq 1 60); do "$@" && return 0; sleep 1; done
   fail "timeout waiting for $label"
 }
-wait_for_candidate() {
-  for _attempt in $(seq 1 60); do "$@" && return 0; sleep 1; done
-  return 1
-}
-candidate_boundary() { [[ "${N3_FAULT_PHASE:-}" != "$1" ]]; }
 port_open() { timeout 1 bash -c "</dev/tcp/127.0.0.1/$1" 2>/dev/null; }
 active() { sudo systemctl is-active --quiet "$1"; }
 absent() { ! sudo test -e "$1" || fail "residue at $1"; }
@@ -45,116 +27,9 @@ evidence() {
 diagnostic() {
   python "$evidence_driver" diagnose "$evidence_artifact" --id "$run_id:$1" --category "$1" --phase "$2" --actor "$3" --unit "$4"
 }
-acceptance_arm() {
-  python "$evidence_driver" arm "$evidence_artifact" --id "$1" --ordering "$2" --variant "$3" \
-    --input-sha256 "$acceptance_input_sha" "${@:4}"
-}
 tsnet_open() {
   [[ -n "${sidecar_ip:-}" ]] || return 1
   printf 'GET / HTTP/1.0\r\n\r\n' | timeout 5 sudo "$ts_dir/tailscale" --socket="$work/peer.sock" nc "$sidecar_ip" 443 >/dev/null 2>&1
-}
-current_journal_cursor() {
-  local output cursors
-  output="$(sudo journalctl -n 0 --show-cursor --no-pager)" || return 1
-  cursors="$(sed -n 's/^-- cursor: //p' <<<"$output")"
-  [[ "$(wc -l <<<"$cursors" | xargs)" == 1 && -n "$cursors" ]] || return 1
-  printf '%s\n' "$cursors"
-}
-systemctl_property() {
-  local unit="$1" property="$2" value status
-  set +e
-  value="$(systemctl show "$unit" -p "$property" --value 2>/dev/null)"
-  status=$?
-  set -e
-  (( status == 0 )) && [[ -n "$value" && "$value" != *$'\n'* ]] || return 1
-  printf '%s\n' "$value"
-}
-settle_control_terminal_invocation() {
-  local unit=happyranch-tsnet-sidecar.service invocation result exec_main_status
-  sudo systemctl stop "$unit" || return 1
-  sudo systemctl reset-failed "$unit" || return 1
-  invocation="$(systemctl_property "$unit" InvocationID)" || return 1
-  result="$(systemctl_property "$unit" Result)" || return 1
-  exec_main_status="$(systemctl_property "$unit" ExecMainStatus)" || return 1
-  [[ "$invocation" =~ ^[0-9a-f]{32}$ && "$result" =~ ^[a-z][a-z-]*$ && "$exec_main_status" =~ ^[0-9]+$ ]] || return 1
-  printf '%s\t%s\t%s\n' "$invocation" "$result" "$exec_main_status"
-}
-current_control_terminal_evidence() {
-  local cursor="$1" invocation_id="$2" result="$3" exec_main_status="$4" qualifying_mode="${5:-engine_start}"
-  sudo journalctl --after-cursor="$cursor" -o json --output-fields=MESSAGE,_SYSTEMD_INVOCATION_ID --no-pager | python -c '
-import json, sys
-invocation, result, exec_main_status, qualifying_mode = sys.argv[1:]
-if len(invocation) != 32 or any(c not in "0123456789abcdef" for c in invocation):
-    raise SystemExit(1)
-if result not in {"success", "resources", "timeout", "exit-code", "signal", "core-dump", "watchdog", "start-limit-hit", "protocol"}:
-    raise SystemExit(1)
-if not exec_main_status.isascii() or not exec_main_status.isdigit() or int(exec_main_status) > 255:
-    raise SystemExit(1)
-phases = {
-    "credential_input": "input_acquisition",
-    "engine_start": "engine_initialization",
-    "network_join": "peer_establishment",
-    "durable_commit": "receipt_commit",
-}
-counts = {scope: {category: 0 for category in phases} for scope in ("pinned", "window")}
-for line in sys.stdin:
-    if not line.strip():
-        continue
-    entry = json.loads(line)
-    message = entry.get("MESSAGE")
-    if not isinstance(message, str) or not message.startswith("diagnostic_receipt="):
-        continue
-    receipt = json.loads(message.split("=", 1)[1])
-    category = receipt.get("category") if isinstance(receipt, dict) else None
-    expected = {
-        "category": category, "phase": phases.get(category),
-        "actor": "tsnet-sidecar", "unit": "happyranch-tsnet-sidecar.service",
-        "outcome": "failed", "terminal": True, "assertion": {"status": "completed"},
-    }
-    if category not in phases or receipt != expected:
-        raise SystemExit(1)
-    counts["window"][category] += 1
-    if entry.get("_SYSTEMD_INVOCATION_ID") == invocation:
-        counts["pinned"][category] += 1
-def summary(scope):
-    values = counts[scope]
-    return {
-        "categories": sorted(category for category, count in values.items() if count),
-        "category_counts": values,
-        "receipt_count": sum(values.values()),
-    }
-pinned = summary("pinned")
-pinned["qualifying_receipt_count"] = pinned["receipt_count"] if qualifying_mode == "all" else counts["pinned"]["engine_start"]
-pinned["cardinality"] = "zero" if pinned["receipt_count"] == 0 else "one" if pinned["receipt_count"] == 1 else "multiple"
-output = {
-    "pinned_invocation": pinned,
-    "systemd": {"result": result, "exec_main_status": int(exec_main_status)},
-    "window": summary("window"),
-}
-print(json.dumps(output, sort_keys=True, separators=(",", ":")))
-' "$invocation_id" "$result" "$exec_main_status" "$qualifying_mode"
-}
-settle_terminal_invocation() { settle_control_terminal_invocation; }
-current_terminal_evidence() { current_control_terminal_evidence "$@"; }
-control_terminal_evidence_qualifies() {
-  python -c 'import json,sys; d=json.load(sys.stdin); p=d["pinned_invocation"]; assert p["qualifying_receipt_count"] == p["receipt_count"] == 1; assert p["categories"] == ["engine_start"]'
-}
-capture_control_terminal_snapshot() {
-  local cursor="$1" output_path="$2" unit=happyranch-tsnet-sidecar.service
-  local invocation result exec_main_status terminal_evidence
-  # Pin the invocation while the failed unit is still observable. Stopping the
-  # unit settles any pending restart, but reset-failed is destructive to the
-  # properties used for the exact invocation/receipt join and must happen only
-  # after the validated snapshot is durable.
-  invocation="$(systemctl_property "$unit" InvocationID)" || return 1
-  [[ "$invocation" =~ ^[0-9a-f]{32}$ ]] || return 1
-  sudo systemctl stop "$unit" || return 1
-  result="$(systemctl_property "$unit" Result)" || return 1
-  exec_main_status="$(systemctl_property "$unit" ExecMainStatus)" || return 1
-  terminal_evidence="$(current_control_terminal_evidence "$cursor" "$invocation" "$result" "$exec_main_status")" || return 1
-  control_terminal_evidence_qualifies <<<"$terminal_evidence" || return 1
-  printf '%s\n' "$terminal_evidence" >"$output_path"
-  sudo systemctl reset-failed "$unit" || return 1
 }
 systemctl_absent_value() {
   local unit="$1" property="$2" expected="$3" value status
@@ -363,15 +238,6 @@ sudo systemctl daemon-reload
 [[ "$(sudo stat -c %U:%G:%a /etc/happyranch/daemon.token)" == "root:root:600" ]] || fail "daemon credential source custody mismatch"
 [[ "$(sudo stat -c %U:%G:%a /etc/happyranch/enrollment.key)" == "root:root:600" ]] || fail "enrollment credential source custody mismatch"
 
-# Acceptance-only AF_NETLINK A/B. The package is immutable; the candidate's
-# sole semantic delta is this harness-created transient systemd drop-in.
-acceptance_input_sha="$(printf '%s\n' "$package_sha" "$HEADSCALE_VERSION" "$HEADSCALE_SHA256" "$TAILSCALE_VERSION" "$TAILSCALE_SHA256" "synthetic-peer-ci" "443" "18443" | sha256sum | cut -d' ' -f1)"
-acceptance_arms=(
-  "ordering-a-control:A:control"
-  "ordering-a-candidate:A:candidate"
-  "ordering-b-candidate:B:candidate"
-  "ordering-b-control:B:control"
-)
 capture_denial_matrix() {
   local arm_id="$1"
   # Execute bounded probes as the shipping service user before teardown. Only
@@ -419,71 +285,7 @@ json.dump({"schema":"happyranch.n3.sandbox-denial-matrix","version":1,
 PY
   python "$evidence_driver" validate-denial-matrix "$diagnostics/$arm_id-denial-matrix.json" --expected-arm "$arm_id"
 }
-preserve_candidate_failure() {
-  candidate_failure_preserving=1
-  local denial_path="$diagnostics/$current_acceptance_arm-denial-matrix.json"
-  local terminal_path="$diagnostics/$current_acceptance_arm-candidate-terminal-evidence.json"
-  [[ -n "$current_acceptance_arm" && -n "$candidate_failure_phase" ]] || return 1
-  if [[ ! -s "$candidate_snapshot_path" ]]; then
-    if [[ -z "$arm_journal_cursor" ]]; then
-      write_candidate_preservation_failure cursor_unavailable
-      return 1
-    fi
-    if [[ "$candidate_invocation_started" != 1 ]]; then
-      write_candidate_preservation_failure invocation_unavailable
-      return 1
-    fi
-    capture_candidate_snapshot || {
-      write_candidate_preservation_failure snapshot_unavailable
-      return 1
-    }
-  fi
-  python - "$current_acceptance_arm" "$candidate_failure_phase" "$candidate_snapshot_path" "$terminal_path" <<'PY'
-import json, pathlib, sys
-arm, phase, snapshot_path, output_path = sys.argv[1:]
-snapshot = json.loads(pathlib.Path(snapshot_path).read_text())
-doc = {"schema":"happyranch.n3.candidate-terminal-evidence","version":1,
-       "arm_id":arm,"phase":phase,"invocation_binding":"settled_current",
-       "terminal_evidence":snapshot["terminal_evidence"],
-       "denial_matrix":snapshot["denial_matrix"]}
-pathlib.Path(output_path).write_text(json.dumps(doc, sort_keys=True, separators=(",", ":")) + "\n")
-PY
-  if ! python "$evidence_driver" validate-candidate-terminal "$terminal_path" --expected-arm "$current_acceptance_arm"; then
-    rm -f "$candidate_snapshot_path" "$terminal_path"
-    write_candidate_preservation_failure snapshot_invalid
-    return 1
-  fi
-  candidate_failure_preserved=1
-}
-write_candidate_preservation_failure() {
-  local failure_code="$1"
-  candidate_preservation_failure_path="$diagnostics/$current_acceptance_arm-candidate-preservation-failure.json"
-  python - "$current_acceptance_arm" "$candidate_failure_phase" "$failure_code" "$candidate_preservation_failure_path" <<'PY'
-import json, pathlib, sys
-arm, phase, code, output = sys.argv[1:]
-pathlib.Path(output).write_text(json.dumps({"schema":"happyranch.n3.candidate-preservation-failure","version":1,
-    "arm_id":arm,"phase":phase,"failure_code":code}, sort_keys=True, separators=(",", ":")) + "\n")
-PY
-  python "$evidence_driver" validate-candidate-preservation-failure "$candidate_preservation_failure_path" --expected-arm "$current_acceptance_arm"
-}
-capture_candidate_snapshot() {
-  local denial_path="$diagnostics/$current_acceptance_arm-denial-matrix.json"
-  [[ -n "$arm_journal_cursor" ]] || return 1
-  if [[ ! -f "$denial_path" ]]; then
-    capture_denial_matrix "$current_acceptance_arm" || return 1
-  fi
-  local invocation_id systemd_result exec_main_status terminal_evidence
-  IFS=$'\t' read -r invocation_id systemd_result exec_main_status < <(settle_terminal_invocation) || return 1
-  terminal_evidence="$(current_terminal_evidence "$arm_journal_cursor" "$invocation_id" "$systemd_result" "$exec_main_status" all)" || return 1
-  candidate_snapshot_path="$diagnostics/$current_acceptance_arm-candidate-settled-snapshot.json"
-  python - "$terminal_evidence" "$denial_path" "$candidate_snapshot_path" <<'PY'
-import json, pathlib, sys
-terminal, denial_path, output = sys.argv[1:]
-pathlib.Path(output).write_text(json.dumps({"terminal_evidence":json.loads(terminal),
-    "denial_matrix":json.loads(pathlib.Path(denial_path).read_text())}, sort_keys=True, separators=(",", ":")) + "\n")
-PY
-}
-arm_cleanup() {
+shipping_cleanup() {
   local cleanup_complete=0 residue_root="${N3_RESIDUE_ROOT:-}"
   # These requests are deliberately idempotent: the pre-arm reset also runs
   # after a prior cleanup has removed the units.  The explicit process, port,
@@ -513,9 +315,8 @@ arm_cleanup() {
   [[ -z "$(sudo find "${residue_root:-/}" -maxdepth 1 \( -name '.happyranch-stage-*' -o -name '.happyranch-tmp-*' \) -print -quit)" ]] || cleanup_complete=1
   (( cleanup_complete == 0 ))
 }
-arm_reset() {
-  local arm_id="$1" variant="$2"
-  arm_cleanup || return 1
+reset_shipping_unit() {
+  shipping_cleanup || return 1
   sudo install -d -m 0700 -o happyranch -g happyranch /etc/happyranch
   sudo install -m 0600 -o root -g root "$work/daemon.token" /etc/happyranch/daemon.token
   sudo install -m 0600 -o happyranch -g happyranch "$work/connector.json" /etc/happyranch/connector.json
@@ -531,89 +332,15 @@ from pathlib import Path
 from runtime.remote_access.linux_package import install_linux_package
 install_linux_package(Path(sys.argv[1]), Path('/'), system_service=True)
 PY
-  if [[ "$variant" == candidate ]]; then
-    sudo install -d -m 0755 /etc/systemd/system/happyranch-tsnet-sidecar.service.d
-    printf '%s\n' '[Service]' 'RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK' | sudo tee /etc/systemd/system/happyranch-tsnet-sidecar.service.d/90-ci-af-netlink.conf >/dev/null
-  fi
   sudo systemctl daemon-reload
-  printf 'arm=%s reset=complete cleanup_complete=true\n' "$arm_id" >>"$diagnostics/acceptance-arms.log"
+  printf 'shipping_unit_reset=complete cleanup_complete=true\n' >>"$diagnostics/shipping-unit.log"
 }
-for arm_spec in "${acceptance_arms[@]}"; do
-  IFS=: read -r arm_id ordering variant <<<"$arm_spec"
-  current_acceptance_arm="$arm_id"; current_acceptance_variant="$variant"
-  candidate_failure_phase=pre_cursor; candidate_failure_preserved=0; candidate_failure_preserving=0
-  arm_journal_cursor=""; candidate_snapshot_path=""; candidate_preservation_failure_path=""
-  candidate_invocation_started=0
-  [[ "$variant" != candidate ]] || candidate_boundary pre_cursor || fail "candidate pre-cursor boundary failed"
-  arm_journal_cursor="$(current_journal_cursor)" || fail "current arm journal cursor unavailable"
-  candidate_failure_phase=pre_reset
-  [[ "$variant" != candidate ]] || candidate_boundary pre_reset || fail "candidate pre-reset boundary failed"
-  candidate_failure_phase=setup_start
-  arm_reset "$arm_id" "$variant" || fail "acceptance arm reset/setup failed"
-  production_expected_peer_visible=0
-  sudo test ! -e /var/lib/happyranch-tsnet-sidecar/credential.consumed || fail "current arm ExpectedPeers marker was not fresh"
-  [[ "$variant" != candidate ]] || candidate_invocation_started=1
-  if [[ "$ordering" == A ]]; then
-    sudo systemctl start --no-block happyranch-connector.service
-    sudo systemctl start happyranch-tsnet-sidecar.service || true
-  else
-    sudo systemctl start --no-block happyranch-tsnet-sidecar.service
-    sudo systemctl start happyranch-connector.service || true
-  fi
-  if [[ "$variant" == control ]]; then
-    sleep 2
-    ! active happyranch-tsnet-sidecar.service || fail "shipping control unexpectedly READY"
-    control_snapshot_path="$diagnostics/$arm_id-control-settled-snapshot.json"
-    capture_control_terminal_snapshot "$arm_journal_cursor" "$control_snapshot_path" || fail "shipping control terminal snapshot unsafe or unavailable"
-    redacted_control_evidence="$(<"$control_snapshot_path")"
-    printf '{"arm_id":"%s","invocation_binding":"current","terminal_evidence":%s}\n' "$arm_id" "$redacted_control_evidence" >>"$diagnostics/control-terminal-receipts.jsonl"
-    control_terminal_evidence_qualifies <<<"$redacted_control_evidence" || fail "shipping control current arm coarse receipt cardinality mismatch"
-    python "$evidence_driver" diagnose "$evidence_artifact" --id "$run_id:$arm_id:engine_start" --category engine_start --phase engine_initialization --actor tsnet-sidecar --unit happyranch-tsnet-sidecar.service
-    arm_result_args=(--control-category engine_start --control-phase engine_initialization)
-  else
-    candidate_boundary setup_start || fail "candidate setup/start boundary failed"
-    candidate_failure_phase=ready
-    if ! wait_for_candidate active happyranch-tsnet-sidecar.service; then
-      fail "AF_NETLINK candidate did not become READY"
-    fi
-    candidate_boundary ready || fail "candidate READY boundary failed"
-    # This arm-fresh production marker is committed only after TSNetEngine has
-    # observed the sole configured ExpectedPeer. It precedes listener READY
-    # and is independent of the synthetic peer's reverse status query below.
-    if sudo test -f /var/lib/happyranch-tsnet-sidecar/credential.consumed; then
-      production_expected_peer_visible=1
-    fi
-    candidate_failure_phase=expected_peers
-    sidecar_ip="$(sudo "$ts_dir/tailscale" --socket="$work/peer.sock" status --json | python -c 'import json,sys; d=json.load(sys.stdin); print(next(ip for p in d.get("Peer",{}).values() if p.get("HostName")=="home-sidecar-ci" for ip in p.get("TailscaleIPs",[]) if ":" not in ip))')" || fail "candidate ExpectedPeers visibility failed"
-    candidate_boundary expected_peers || fail "candidate ExpectedPeers boundary failed"
-    candidate_failure_phase=listener
-    tsnet_open || fail "candidate virtual listener unreachable"
-    candidate_boundary listener || fail "candidate listener boundary failed"
-    candidate_failure_phase=denial_matrix
-    candidate_boundary denial_matrix || fail "candidate denial-matrix boundary failed"
-    candidate_failure_phase=assertion
-    (( production_expected_peer_visible == 1 )) || fail "candidate production ExpectedPeers observation missing"
-    candidate_boundary assertion || fail "candidate assertion boundary failed"
-    arm_result_args=(--ready)
-    (( production_expected_peer_visible == 1 )) && arm_result_args+=(--expected-peer-visible)
-    arm_result_args+=(--virtual-listener-reachable)
-  fi
-  if [[ "$variant" == candidate ]]; then
-    candidate_failure_phase=cleanup
-    capture_candidate_snapshot || fail "candidate settled snapshot unavailable before cleanup"
-    candidate_boundary cleanup || fail "candidate cleanup boundary failed"
-  fi
-  arm_cleanup || fail "acceptance arm cleanup incomplete"
-  # Receipt follows every production assertion, including cleanup.
-  [[ "$variant" != candidate ]] || candidate_failure_phase=post_cleanup_assertion
-  [[ "$variant" != candidate ]] || candidate_boundary post_cleanup_assertion || fail "candidate post-cleanup assertion boundary failed"
-  acceptance_arm "$arm_id" "$ordering" "$variant" "${arm_result_args[@]}" || fail "acceptance arm assertion failed"
-  current_acceptance_arm=""; current_acceptance_variant=""; candidate_failure_phase=""
-done
-
-# Restore one fresh candidate fixture for the existing lifecycle matrix. This
-# remains harness-local and does not alter the packaged unit renderer.
-arm_reset lifecycle-candidate candidate
+# The denial probe keeps AF_NETLINK explicitly available because the shipping
+# sidecar needs it. Every other sandbox dimension remains measured and
+# fail-closed. The lifecycle proof then starts from a fresh, unmodified package
+# installation with no harness-created AF_NETLINK drop-in.
+capture_denial_matrix shipping-unit
+reset_shipping_unit || fail "fresh shipping-unit reset/setup failed"
 
 # semantic evidence: startup
 sudo mv /etc/happyranch/enrollment.key /etc/happyranch/enrollment.key.held

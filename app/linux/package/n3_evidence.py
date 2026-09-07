@@ -11,13 +11,7 @@ import sys
 from pathlib import Path
 
 SCHEMA = "happyranch.managed-n3.execution-evidence"
-VERSION = 3
-ARM_SPECS = (
-    ("ordering-a-control", "A", "control"),
-    ("ordering-a-candidate", "A", "candidate"),
-    ("ordering-b-candidate", "B", "candidate"),
-    ("ordering-b-control", "B", "control"),
-)
+VERSION = 4
 DIAGNOSTIC_PHASES = {
     "credential_input": "input_acquisition",
     "engine_start": "engine_initialization",
@@ -34,12 +28,6 @@ DENIAL_OPERATIONS = (
 DENIAL_RESULTS = {"allow", "deny", "unknown"}
 DENIAL_CATEGORIES = {"none", "permission_denied", "unavailable", "timeout", "operational_error"}
 DENIAL_ERRNOS = {None, "EACCES", "EPERM", "ENOENT", "ENODEV", "EAFNOSUPPORT", "ETIMEDOUT", "ECONNREFUSED", "EIO", "OTHER"}
-CANDIDATE_FAILURE_PHASES = {
-    "pre_cursor", "pre_reset", "setup_start", "ready", "expected_peers",
-    "listener", "denial_matrix", "assertion", "cleanup",
-    "post_cleanup_assertion",
-}
-PRESERVATION_FAILURE_CODES = {"cursor_unavailable", "invocation_unavailable", "snapshot_unavailable", "snapshot_invalid"}
 PHASES = {
     "startup": ("process_absent", "tsnet_admission_absent", "connector_staged_credential_service_readable_non_writable", "sidecar_staged_credential_service_readable_non_writable", "credential_source_retired", "credential_dropin_retired", "composite_ready_after_sidecar", "missing_consumed_state_failed_closed"),
     "admission": ("tsnet_admission_reachable",),
@@ -74,6 +62,7 @@ def _load(path: Path) -> dict:
 
 
 def validate(doc: dict, *, expected_subject: str | None = None, expected_run: str | None = None) -> None:
+    assert set(doc) == {"schema", "version", "subject", "run", "records", "diagnostics", "terminal", "digest"}
     assert doc.get("schema") == SCHEMA and doc.get("version") == VERSION
     subject, run = doc.get("subject"), doc.get("run")
     assert isinstance(subject, dict) and set(subject) == {"git_head", "package_sha256"}
@@ -84,36 +73,6 @@ def validate(doc: dict, *, expected_subject: str | None = None, expected_run: st
         assert subject["git_head"] == expected_subject
     if expected_run is not None:
         assert run["id"] == expected_run
-    arms = doc.get("acceptance")
-    assert isinstance(arms, list) and len(arms) == len(ARM_SPECS)
-    input_id: str | None = None
-    for sequence, (arm, spec) in enumerate(zip(arms, ARM_SPECS, strict=True), 1):
-        arm_id, ordering, variant = spec
-        assert set(arm) == {
-            "id", "sequence", "ordering", "variant", "subject_git_head",
-            "package_sha256", "input_sha256", "zero_skip", "fake_count",
-            "skip_count", "ready", "expected_peer_visible",
-            "virtual_listener_reachable", "control_category", "control_phase",
-            "cleanup_complete", "assertion",
-        }
-        assert (arm["id"], arm["ordering"], arm["variant"]) == (arm_id, ordering, variant)
-        assert arm["sequence"] == sequence
-        assert arm["subject_git_head"] == subject["git_head"]
-        assert arm["package_sha256"] == subject["package_sha256"]
-        assert isinstance(arm["input_sha256"], str) and len(arm["input_sha256"]) == 64
-        assert all(c in "0123456789abcdef" for c in arm["input_sha256"])
-        input_id = input_id or arm["input_sha256"]
-        assert arm["input_sha256"] == input_id
-        assert arm["zero_skip"] is True and arm["fake_count"] == arm["skip_count"] == 0
-        assert arm["cleanup_complete"] is True
-        assert arm["assertion"] == {"status": "completed"}
-        gates = (arm["ready"], arm["expected_peer_visible"], arm["virtual_listener_reachable"])
-        if variant == "candidate":
-            assert gates == (True, True, True)
-            assert arm["control_category"] is arm["control_phase"] is None
-        else:
-            assert gates == (False, False, False)
-            assert (arm["control_category"], arm["control_phase"]) == ("engine_start", "engine_initialization")
     records = doc.get("records")
     assert isinstance(records, list)
     expected = {(phase, observation) for phase, values in PHASES.items() for observation in values}
@@ -153,7 +112,7 @@ def validate(doc: dict, *, expected_subject: str | None = None, expected_run: st
 def validate_denial_matrix(doc: dict, *, expected_arm: str | None = None) -> None:
     assert set(doc) == {"schema", "version", "arm_id", "operations"}
     assert doc["schema"] == "happyranch.n3.sandbox-denial-matrix" and doc["version"] == 1
-    assert doc["arm_id"] in {item[0] for item in ARM_SPECS if item[2] == "candidate"}
+    assert doc["arm_id"] == "shipping-unit"
     if expected_arm is not None:
         assert doc["arm_id"] == expected_arm
     operations = doc["operations"]
@@ -167,71 +126,12 @@ def validate_denial_matrix(doc: dict, *, expected_arm: str | None = None) -> Non
         assert not any(marker in rendered for marker in SECRET_MARKERS)
 
 
-def validate_candidate_terminal(doc: dict, *, expected_arm: str | None = None) -> None:
-    assert set(doc) == {
-        "schema", "version", "arm_id", "phase", "invocation_binding",
-        "terminal_evidence", "denial_matrix",
-    }
-    assert doc["schema"] == "happyranch.n3.candidate-terminal-evidence" and doc["version"] == 1
-    candidate_arms = {item[0] for item in ARM_SPECS if item[2] == "candidate"}
-    assert doc["arm_id"] in candidate_arms
-    if expected_arm is not None:
-        assert doc["arm_id"] == expected_arm
-    assert doc["phase"] in CANDIDATE_FAILURE_PHASES
-    assert doc["invocation_binding"] == "settled_current"
-    terminal = doc["terminal_evidence"]
-    assert isinstance(terminal, dict) and set(terminal) == {"pinned_invocation", "systemd", "window"}
-    categories = set(DIAGNOSTIC_PHASES)
-    for scope in ("pinned_invocation", "window"):
-        summary = terminal[scope]
-        expected_keys = {"categories", "category_counts", "receipt_count"}
-        if scope == "pinned_invocation":
-            expected_keys |= {"qualifying_receipt_count", "cardinality"}
-        assert set(summary) == expected_keys
-        counts = summary["category_counts"]
-        assert isinstance(counts, dict) and set(counts) == categories
-        assert all(type(value) is int and value >= 0 for value in counts.values())
-        assert summary["receipt_count"] == sum(counts.values())
-        assert summary["categories"] == sorted(key for key, value in counts.items() if value)
-    pinned = terminal["pinned_invocation"]
-    assert pinned["qualifying_receipt_count"] == pinned["receipt_count"]
-    expected_cardinality = "zero" if pinned["receipt_count"] == 0 else "one" if pinned["receipt_count"] == 1 else "multiple"
-    assert pinned["cardinality"] == expected_cardinality
-    systemd = terminal["systemd"]
-    assert set(systemd) == {"result", "exec_main_status"}
-    assert systemd["result"] in {"success", "resources", "timeout", "exit-code", "signal", "core-dump", "watchdog", "start-limit-hit", "protocol"}
-    assert type(systemd["exec_main_status"]) is int and 0 <= systemd["exec_main_status"] <= 255
-    validate_denial_matrix(doc["denial_matrix"], expected_arm=doc["arm_id"])
-    rendered = json.dumps(doc, sort_keys=True).lower()
-    assert not any(marker in rendered for marker in SECRET_MARKERS)
-
-
-def validate_candidate_preservation_failure(doc: dict, *, expected_arm: str | None = None) -> None:
-    assert set(doc) == {"schema", "version", "arm_id", "phase", "failure_code"}
-    assert doc["schema"] == "happyranch.n3.candidate-preservation-failure" and doc["version"] == 1
-    candidate_arms = {item[0] for item in ARM_SPECS if item[2] == "candidate"}
-    assert doc["arm_id"] in candidate_arms
-    if expected_arm is not None:
-        assert doc["arm_id"] == expected_arm
-    assert doc["phase"] in CANDIDATE_FAILURE_PHASES
-    assert doc["failure_code"] in PRESERVATION_FAILURE_CODES
-    rendered = json.dumps(doc, sort_keys=True).lower()
-    assert not any(marker in rendered for marker in SECRET_MARKERS)
-
-
 def main() -> None:
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
     init = sub.add_parser("init")
     init.add_argument("path", type=Path); init.add_argument("--git-head", required=True)
     init.add_argument("--package-sha256", required=True); init.add_argument("--run-id", required=True)
-    arm = sub.add_parser("arm")
-    arm.add_argument("path", type=Path); arm.add_argument("--id", required=True)
-    arm.add_argument("--ordering", required=True); arm.add_argument("--variant", required=True)
-    arm.add_argument("--input-sha256", required=True)
-    arm.add_argument("--ready", action="store_true"); arm.add_argument("--expected-peer-visible", action="store_true")
-    arm.add_argument("--virtual-listener-reachable", action="store_true")
-    arm.add_argument("--control-category"); arm.add_argument("--control-phase")
     observe = sub.add_parser("observe")
     observe.add_argument("path", type=Path); observe.add_argument("--phase", required=True)
     observe.add_argument("--observation", required=True); observe.add_argument("--assertion-id", required=True)
@@ -244,33 +144,13 @@ def main() -> None:
     check.add_argument("--expected-subject"); check.add_argument("--expected-run")
     denial = sub.add_parser("validate-denial-matrix"); denial.add_argument("path", type=Path)
     denial.add_argument("--expected-arm", required=True)
-    candidate_terminal = sub.add_parser("validate-candidate-terminal")
-    candidate_terminal.add_argument("path", type=Path); candidate_terminal.add_argument("--expected-arm", required=True)
-    preservation_failure = sub.add_parser("validate-candidate-preservation-failure")
-    preservation_failure.add_argument("path", type=Path); preservation_failure.add_argument("--expected-arm", required=True)
     args = parser.parse_args()
     if args.command == "init":
         doc = {"schema": SCHEMA, "version": VERSION,
                "subject": {"git_head": args.git_head, "package_sha256": args.package_sha256},
                "run": {"id": args.run_id, "zero_skip": True, "fake_count": 0, "skip_count": 0},
-               "acceptance": [], "records": [], "diagnostics": [], "terminal": None}
+               "records": [], "diagnostics": [], "terminal": None}
         args.path.parent.mkdir(parents=True, exist_ok=True)
-        args.path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
-    elif args.command == "arm":
-        doc = _load(args.path)
-        assert doc.get("terminal") is None
-        doc["acceptance"].append({
-            "id": args.id, "sequence": len(doc["acceptance"]) + 1,
-            "ordering": args.ordering, "variant": args.variant,
-            "subject_git_head": doc["subject"]["git_head"],
-            "package_sha256": doc["subject"]["package_sha256"],
-            "input_sha256": args.input_sha256, "zero_skip": True,
-            "fake_count": 0, "skip_count": 0, "ready": args.ready,
-            "expected_peer_visible": args.expected_peer_visible,
-            "virtual_listener_reachable": args.virtual_listener_reachable,
-            "control_category": args.control_category, "control_phase": args.control_phase,
-            "cleanup_complete": True, "assertion": {"status": "completed"},
-        })
         args.path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
     elif args.command == "observe":
         doc = _load(args.path)
@@ -297,10 +177,6 @@ def main() -> None:
         validate(_load(args.path), expected_subject=args.expected_subject, expected_run=args.expected_run)
     elif args.command == "validate-denial-matrix":
         validate_denial_matrix(_load(args.path), expected_arm=args.expected_arm)
-    elif args.command == "validate-candidate-terminal":
-        validate_candidate_terminal(_load(args.path), expected_arm=args.expected_arm)
-    else:
-        validate_candidate_preservation_failure(_load(args.path), expected_arm=args.expected_arm)
 
 
 if __name__ == "__main__":
