@@ -83,7 +83,20 @@ jobs:
           python-version: "3.14"
 
       - name: Sync dependencies
-        run: uv sync --frozen
+        run: uv sync --frozen --group build
+
+      - name: Managed Linux package shipping seam
+        run: |
+          set -eux
+          package_tmp="$(mktemp -d)"
+          trap 'rm -rf "$package_tmp"' EXIT
+          (cd app/linux/tsnet-sidecar && go test ./... && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -buildvcs=false -o "$package_tmp/happyranch-tsnet-sidecar" ./cmd/happyranch-tsnet-sidecar)
+          uv build --wheel --out-dir "$package_tmp"
+          wheel="$(find "$package_tmp" -maxdepth 1 -name 'happyranch-*.whl' -print -quit)"
+          uv run python app/linux/package/build_connector.py --wheel "$wheel" --output "$package_tmp/happyranch-connector"
+          (cd "$package_tmp" && ./happyranch-connector --help)
+          uv run python app/linux/package/build_package.py --sidecar "$package_tmp/happyranch-tsnet-sidecar" --connector "$package_tmp/happyranch-connector" --wheel "$wheel" --version ci --output "$package_tmp/happyranch-linux-amd64.tar"
+          PACKAGE_TMP="$package_tmp" uv run python -c 'from pathlib import Path; from runtime.remote_access.linux_package import install_linux_package; import os; root=Path(os.environ["PACKAGE_TMP"])/"fixture-root"; install_linux_package(Path(os.environ["PACKAGE_TMP"])/"happyranch-linux-amd64.tar", root); print(root)'
 
       - name: Run canonical store + validation tests
         env:
@@ -109,6 +122,49 @@ jobs:
           uv run pytest -m integration
           tests/integration/test_end_to_end.py::test_register_and_run_completes_via_codex_callback
           -v --tb=short
+
+  managed-n3-real-systemd:
+    name: Managed N3 Real systemd (Ubuntu 24.04)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Install uv
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          enable-cache: true
+          python-version: "3.14"
+      - name: Sync build dependencies
+        run: uv sync --frozen --group build
+      - name: Build actual package
+        run: |
+          set -euo pipefail
+          package_tmp="$(mktemp -d)"
+          echo "PACKAGE_TMP=$package_tmp" >> "$GITHUB_ENV"
+          (cd app/linux/tsnet-sidecar && go test ./... && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -buildvcs=false -o "$package_tmp/happyranch-tsnet-sidecar" ./cmd/happyranch-tsnet-sidecar)
+          uv build --wheel --out-dir "$package_tmp"
+          wheel="$(find "$package_tmp" -maxdepth 1 -name 'happyranch-*.whl' -print -quit)"
+          uv run python app/linux/package/build_connector.py --wheel "$wheel" --output "$package_tmp/happyranch-connector"
+          uv run python app/linux/package/build_package.py --sidecar "$package_tmp/happyranch-tsnet-sidecar" --connector "$package_tmp/happyranch-connector" --wheel "$wheel" --version ci --output "$package_tmp/happyranch-linux-amd64.tar"
+      - name: Exercise actual packaged composite against pinned Headscale and peer
+        env:
+          PACKAGE_TAR: ${{ env.PACKAGE_TMP }}/happyranch-linux-amd64.tar
+          PROOF_SUBJECT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          N3_DIAGNOSTICS_DIR: ${{ runner.temp }}/managed-n3-evidence
+        run: app/linux/package/real_systemd_n3.sh
+      - name: Validate successful Managed N3 execution artifact
+        if: success()
+        run: python app/linux/package/n3_evidence.py validate "${{ runner.temp }}/managed-n3-evidence/execution-evidence.json" --expected-subject "${{ github.event.pull_request.head.sha || github.sha }}"
+      - name: Upload Managed N3 execution evidence and diagnostics
+        if: always()
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: managed-n3-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/managed-n3-evidence
+          if-no-files-found: error
 
   # ── macOS canonical skill store validation (same-owner, unconditional) ──
   # Executor and daemon share the same OS identity — same-owner is the only

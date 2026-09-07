@@ -214,6 +214,11 @@ class _MissingCredentialProvider:
 def sd_notify(state: str, notify_socket: str | None = None) -> bool:
     """Send one sd_notify datagram (``READY=1``/``WATCHDOG=1``/``STOPPING=1``)
     to ``$NOTIFY_SOCKET``. Returns False when not running under systemd."""
+    health_fd = os.environ.get("HAPPYRANCH_CHILD_HEALTH_FD")
+    generation = os.environ.get("HAPPYRANCH_CHILD_HEALTH_GENERATION")
+    if health_fd is not None or generation is not None:
+        return _write_child_health(state, health_fd, generation)
+
     import socket
 
     path = notify_socket if notify_socket is not None else __import__("os").environ.get("NOTIFY_SOCKET")
@@ -228,6 +233,48 @@ def sd_notify(state: str, notify_socket: str | None = None) -> bool:
             sock.close()
         return True
     except OSError:
+        return False
+
+
+_health_lock = threading.Lock()
+_health_sequence = 0
+
+
+def _write_child_health(state: str, raw_fd: str | None, generation: str | None) -> bool:
+    """Write one strict, generation-bound record to the main supervisor.
+
+    Frozen PyInstaller executables use a bootloader parent, so only this
+    structured pipe crosses the child boundary; the child never inherits or
+    writes systemd's notification socket.
+    """
+    kinds = {
+        "READY=1\n": "ready",
+        "WATCHDOG=1\n": "healthy",
+        "STOPPING=1\n": "stopping",
+        "STATUS=waiting for readiness\n": "waiting",
+        "STATUS=no provider configured; no listener\n": "failed",
+        "STATUS=provider failed to start; no listener\n": "failed",
+    }
+    if raw_fd is None or generation is None or state not in kinds:
+        return False
+    try:
+        fd = int(raw_fd)
+        if fd < 3 or len(generation) != 32:
+            return False
+        int(generation, 16)
+        global _health_sequence
+        with _health_lock:
+            _health_sequence += 1
+            record = {
+                "version": 1,
+                "generation": generation,
+                "sequence": _health_sequence,
+                "state": kinds[state],
+            }
+            raw = (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode()
+            os.write(fd, raw)
+        return True
+    except (OSError, ValueError):
         return False
 
 

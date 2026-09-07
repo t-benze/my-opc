@@ -43,7 +43,7 @@ FIXTURE_FILES = {
 # Extra required top-level keys beyond the common (version/name/status/description)
 # set, per fixture.
 _TOP_LEVEL_EXTRA = {
-    "managed_topology": ["transport", "endpoints", "sidecar_boundary", "connector_ingress", "readiness", "secrets", "visibility", "fallbacks", "n2_lifecycle_matrix", "acceptance_matrix", "delivery_status"],
+    "managed_topology": ["transport", "endpoints", "sidecar_boundary", "connector_ingress", "readiness", "secrets", "visibility", "fallbacks", "n2_lifecycle_matrix", "n3_lifecycle_matrix", "n3_acceptance_harness", "acceptance_matrix", "delivery_status"],
     "route_policy": [
         "decision_order",
         "default_behavior",
@@ -441,11 +441,11 @@ def test_n2_lifecycle_matrix_covers_shipping_boundaries() -> None:
 
 
 def test_managed_delivery_status_preserves_diy_and_gates_future_units() -> None:
-    assert _load("managed_topology")["delivery_status"] == {"n0": "contract_implemented", "n1": "sidecar_core_build_test_only_no_distribution_or_acceptance", "n2": "managed_loopback_connector_ingress_implemented", "n3_through_n6": "founder_gated_not_authorized", "unit_4b_2": "delivered_independent_not_network_provisioning_or_acceptance", "supported_diy": "unchanged_truthful_voluntary_external_tailscale_or_customer_headscale", "supported_diy_for_founder_acceptance": "non_executable_not_managed_path"}
+    assert _load("managed_topology")["delivery_status"] == {"n0": "contract_implemented", "n1": "sidecar_core_build_test_only", "n2": "managed_loopback_connector_ingress_implemented", "n3": "linux_package_and_composite_supervision_implemented_no_deployment_or_acceptance", "n4_through_n6": "founder_gated_separate_units", "unit_4b_2": "delivered_independent_not_network_provisioning_or_acceptance", "supported_diy": "unchanged_truthful_voluntary_external_tailscale_or_customer_headscale", "supported_diy_for_founder_acceptance": "non_executable_not_managed_path"}
 
 
 _TOP_LEVEL_EXTRA = {
-    "managed_topology": ["transport", "endpoints", "sidecar_boundary", "connector_ingress", "readiness", "secrets", "visibility", "fallbacks", "n2_lifecycle_matrix", "acceptance_matrix", "delivery_status"],
+    "managed_topology": ["transport", "endpoints", "sidecar_boundary", "connector_ingress", "readiness", "secrets", "visibility", "fallbacks", "n2_lifecycle_matrix", "n3_lifecycle_matrix", "n3_acceptance_harness", "acceptance_matrix", "delivery_status"],
     "route_policy": [
         "decision_order",
         "default_behavior",
@@ -1377,6 +1377,62 @@ def test_no_sentinel_credentials_in_serialized_fixtures(name: str) -> None:
     raw = FIXTURE_FILES[name].read_text(encoding="utf-8")
     hits = _scan_sentinels(raw)
     assert not hits, _format_sentinel_hits(name, hits)
+
+
+def _assert_n3_lifecycle_evidence(matrix: list[dict]) -> None:
+    assert [row["phase"] for row in matrix] == [
+        "startup", "admission", "active_flow", "readiness_loss", "revocation",
+        "shutdown", "partial_failure", "concurrency_reentry", "recovery",
+    ]
+    assert all(row["shipping_tests"] for row in matrix)
+    required_observations = {
+        "startup": {
+            "process_absent",
+            "tsnet_admission_absent",
+            "connector_staged_credential_service_readable_non_writable",
+            "sidecar_staged_credential_service_readable_non_writable",
+            "credential_source_retired",
+            "credential_dropin_retired",
+            "composite_ready_after_sidecar",
+            "missing_consumed_state_failed_closed",
+        },
+        "admission": {"tsnet_admission_reachable"},
+        "active_flow": {"production_process_active", "watchdog_composite_current", "watchdog_ceased_on_sidecar_loss"},
+        "readiness_loss": {"tsnet_admission_removed_before_connector"},
+        "revocation": {"stop_before_connector_cleanup", "tsnet_admission_absent"},
+        "shutdown": {"same_instance_stop_twice", "no_double_close", "no_residue"},
+        "partial_failure": {"fresh_pid", "fresh_composite_gates"},
+        "concurrency_reentry": {"start_then_stop_barrier", "stop_then_start_barrier", "stop_wins"},
+        "recovery": {"fresh_install_rollback_reentry_each_checkpoint", "upgrade_rollback", "retained_payload_units", "fresh_composite_gates", "no_transaction_residue", "credential_free_stopped_restart", "interrupted_retirement_reentry", "explicit_fresh_reenrollment"},
+    }
+    for row in matrix:
+        assert all(test_id.startswith("app/linux/package/real_systemd_n3.sh#") for test_id in row["shipping_tests"]), row
+        assert set(row["observations"]) == required_observations[row["phase"]], row
+        assert len(row["observations"]) == len(set(row["observations"])), row
+        assert "deferred_n6" in row["outcome"] or row["phase"] not in {"admission", "active_flow"}
+
+
+def test_n3_lifecycle_matrix_covers_shipping_package_boundaries() -> None:
+    topology = _load("managed_topology")
+    _assert_n3_lifecycle_evidence(topology["n3_lifecycle_matrix"])
+    assert topology["delivery_status"]["n3"].startswith("linux_package")
+    assert topology["n3_acceptance_harness"] == {
+        "status": "shipping_unit_exact_head_proof",
+        "unit_source": "fresh_plain_generated_shipping_unit",
+        "af_netlink_dropin_absent": True,
+        "denial_matrix_arm": "shipping-unit",
+        "denial_matrix_address_families": "AF_INET AF_INET6 AF_UNIX AF_NETLINK",
+    }
+
+
+def test_n3_lifecycle_validator_rejects_prose_or_tautological_evidence() -> None:
+    topology = _load("managed_topology")
+    index = next(i for i, item in enumerate(topology["n3_lifecycle_matrix"]) if item["phase"] == "shutdown")
+    for invalid in ([], ["shutdown"], ["proof_comment_present"], ["no_residue", "no_residue"]):
+        matrix = [dict(row) for row in topology["n3_lifecycle_matrix"]]
+        matrix[index]["observations"] = invalid
+        with pytest.raises((AssertionError, KeyError)):
+            _assert_n3_lifecycle_evidence(matrix)
 
 
 def test_sentinel_hits_never_echoed_in_validation_errors() -> None:

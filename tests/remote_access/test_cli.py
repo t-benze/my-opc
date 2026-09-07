@@ -142,6 +142,10 @@ def test_parser_exposes_all_commands() -> None:
         "remove-device",
         "pairing-status",
         "recovery",
+        "retire-enrollment-source",
+        "reconcile-enrollment-retirement",
+        "prepare-fresh-enrollment",
+        "credential-capability",
     }
 
 

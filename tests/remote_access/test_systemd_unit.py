@@ -63,6 +63,14 @@ class TestCanonicalHardening:
         assert "Group=happyranch-connector" in text
         assert "WantedBy=multi-user.target" in text
 
+    def test_exact_address_family_sandbox_is_unique(self) -> None:
+        lines = [
+            line
+            for line in render_connector_unit(_spec()).splitlines()
+            if line.startswith("RestrictAddressFamilies=")
+        ]
+        assert lines == ["RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK"]
+
     def test_user_mode_omits_service_user(self) -> None:
         text = render_connector_unit(_spec(system=False))
         assert "User=happyranch-connector" not in text

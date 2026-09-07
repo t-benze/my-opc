@@ -52,7 +52,7 @@ func validConfig(t *testing.T) Config {
 	if err := os.WriteFile(cred, []byte("secret-value\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	return Config{StateDir: state, CredentialFile: cred, ControlURL: "https://headscale.private.example", RoleIdentity: "home-sidecar-123", ExpectedPeer: "mac-client-123", ListenAddr: ":443", ConnectorAddr: "127.0.0.1:9443", DERPPolicy: "private-only"}
+	return Config{StateDir: state, CredentialFile: cred, ControlURL: "https://headscale.private.example", RoleIdentity: "home-sidecar-123", ExpectedPeers: []string{"mac-client-123"}, ListenAddr: ":443", ConnectorAddr: "127.0.0.1:9443", DERPPolicy: "private-only"}
 }
 
 func TestValidateRejectsUnsafeTopology(t *testing.T) {
@@ -114,7 +114,7 @@ func TestCredentialPathWithSymlinkedParentFailsClosed(t *testing.T) {
 	cfg.CredentialFile = filepath.Join(alias, filepath.Base(cfg.CredentialFile))
 	events := []string{}
 	err := New(cfg, &fakeEngine{events: &events}, &net.Dialer{}).Start(context.Background())
-	if !errors.Is(err, ErrCredential) || len(events) != 0 {
+	if !errors.Is(err, ErrCredentialInput) || len(events) != 0 {
 		t.Fatalf("err=%v events=%v", err, events)
 	}
 }
@@ -124,7 +124,11 @@ func TestRedemptionAndDeletionMustBeDurableBeforeListen(t *testing.T) {
 		cfg := validConfig(t)
 		events := []string{}
 		e := &fakeEngine{receipt: receipt, events: &events}
-		if err := New(cfg, e, &net.Dialer{}).Start(context.Background()); !errors.Is(err, ErrCredential) {
+		want := ErrDurableCommit
+		if receipt.Redeemed && receipt.Durable {
+			want = ErrNetworkJoin
+		}
+		if err := New(cfg, e, &net.Dialer{}).Start(context.Background()); !errors.Is(err, want) {
 			t.Fatalf("%v", err)
 		}
 		if contains(events, "listen") {
@@ -192,6 +196,59 @@ func TestStartSuccessConsumesCredentialThenProxiesRawBytes(t *testing.T) {
 	if events[len(events)-2] != "listener-close" || events[len(events)-1] != "engine-close" {
 		t.Fatal(events)
 	}
+}
+
+func TestSystemdStagedCredentialIsReadOnceAndNeverUnlinked(t *testing.T) {
+	cfg := validConfig(t)
+	credentialDir := filepath.Join(filepath.Dir(cfg.StateDir), "systemd-credentials")
+	if err := os.Mkdir(credentialDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	exactCredential := filepath.Join(credentialDir, "enrollment.key")
+	if err := os.Rename(cfg.CredentialFile, exactCredential); err != nil {
+		t.Fatal(err)
+	}
+	cfg.CredentialFile = exactCredential
+	t.Setenv("CREDENTIALS_DIRECTORY", credentialDir)
+	if err := os.Chmod(cfg.CredentialFile, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	events := []string{}
+	probeClient, probeServer := net.Pipe()
+	defer probeServer.Close()
+	listener := &oneListener{acceptErr: net.ErrClosed, events: &events, accepted: make(chan struct{})}
+	e := &fakeEngine{listener: listener, receipt: RedemptionReceipt{Redeemed: true, Durable: true, ExpectedPeerVisible: true}, events: &events}
+	s := New(cfg, e, dialFunc(func(context.Context, string, string) (net.Conn, error) { return probeClient, nil }))
+	if err := s.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(cfg.CredentialFile); err != nil {
+		t.Fatalf("systemd-staged credential must remain systemd-owned: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(cfg.StateDir, consumedMarker)); err != nil {
+		t.Fatalf("durable consumption marker missing: %v", err)
+	}
+	_ = s.Stop()
+}
+
+func TestEnrolledStateRestartDoesNotReadOrRequireCredential(t *testing.T) {
+	cfg := validConfig(t)
+	if err := os.Remove(cfg.CredentialFile); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfg.StateDir, consumedMarker), []byte("durable\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	events := []string{}
+	probeClient, probeServer := net.Pipe()
+	defer probeServer.Close()
+	listener := &oneListener{acceptErr: net.ErrClosed, events: &events, accepted: make(chan struct{})}
+	e := &fakeEngine{listener: listener, receipt: RedemptionReceipt{Redeemed: true, Durable: true, ExpectedPeerVisible: true}, events: &events}
+	s := New(cfg, e, dialFunc(func(context.Context, string, string) (net.Conn, error) { return probeClient, nil }))
+	if err := s.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	_ = s.Stop()
 }
 
 func TestPartialStartAndFailuresCloseListenerFirst(t *testing.T) {
@@ -306,7 +363,7 @@ func TestShippingFailureMatrixUsesStableCategories(t *testing.T) {
 	}{
 		{"engine-start", func(e *[]string, l net.Listener) *fakeEngine {
 			return &fakeEngine{startErr: errors.New("secret"), events: e}
-		}, func(net.Conn) Dialer { return &net.Dialer{} }, ErrCredential},
+		}, func(net.Conn) Dialer { return &net.Dialer{} }, ErrEngineStart},
 		{"listen", func(e *[]string, l net.Listener) *fakeEngine {
 			return &fakeEngine{receipt: RedemptionReceipt{true, true, true}, listenErr: errors.New("secret"), events: e}
 		}, func(c net.Conn) Dialer {

@@ -38,7 +38,7 @@ _SYSTEM_HARDENING: tuple[str, ...] = (
     "RestrictRealtime=yes",
     "LockPersonality=yes",
     "MemoryDenyWriteExecute=yes",
-    "RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX",
+    "RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK",
     "SystemCallArchitectures=native",
     "UMask=0077",
 )
@@ -116,6 +116,7 @@ def render_connector_unit(spec: ConnectorUnitSpec) -> str:
     lines.append(f"WatchdogSec={spec.watchdog_sec}")
     lines.append("TimeoutStopSec=10")
     lines.extend(_SYSTEM_HARDENING)
+    lines.append("NotifyAccess=main")
     if spec.system:
         lines.extend(_SYSTEM_ONLY_HARDENING)
     lines.append(f"StateDirectory={spec.state_dir}")

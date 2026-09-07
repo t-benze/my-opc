@@ -1071,6 +1071,40 @@ class TestLabProvisioning:
 
 
 class TestSdNotify:
+    def test_child_health_transport_is_structured_and_does_not_touch_notify_socket(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        read_fd, write_fd = os.pipe()
+        try:
+            monkeypatch.setenv("HAPPYRANCH_CHILD_HEALTH_FD", str(write_fd))
+            monkeypatch.setenv("HAPPYRANCH_CHILD_HEALTH_GENERATION", "a" * 32)
+            monkeypatch.setenv("NOTIFY_SOCKET", "/must/not/be/used")
+            assert sd_notify("READY=1\n") is True
+            record = json.loads(os.read(read_fd, 4096))
+            assert record == {
+                "generation": "a" * 32,
+                "sequence": record["sequence"],
+                "state": "ready",
+                "version": 1,
+            }
+            assert type(record["sequence"]) is int and record["sequence"] > 0
+        finally:
+            os.close(read_fd)
+            os.close(write_fd)
+
+    @pytest.mark.parametrize("generation", ["", "not-hex", "a" * 31, "a" * 33])
+    def test_child_health_transport_rejects_bad_generation(
+        self, monkeypatch: pytest.MonkeyPatch, generation: str,
+    ) -> None:
+        read_fd, write_fd = os.pipe()
+        try:
+            monkeypatch.setenv("HAPPYRANCH_CHILD_HEALTH_FD", str(write_fd))
+            monkeypatch.setenv("HAPPYRANCH_CHILD_HEALTH_GENERATION", generation)
+            assert sd_notify("READY=1\n") is False
+        finally:
+            os.close(read_fd)
+            os.close(write_fd)
+
     def test_sd_notify_without_socket_returns_false(self) -> None:
         assert sd_notify("READY=1\n", notify_socket=None) is False
 

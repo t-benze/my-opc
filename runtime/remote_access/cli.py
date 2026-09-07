@@ -30,11 +30,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import signal
+import subprocess
 import sys
 from pathlib import Path
+from typing import Callable
 
 from runtime.remote_access.lab_provider import LAB_ONLY_BANNER
+from runtime.remote_access.linux_package import (
+    credential_capability,
+    require_credential_capability,
+)
 from runtime.remote_access.pairing import PairingError, PairingManager
 from runtime.remote_access.state_store import CorruptTrustStateError, StateStoreError
 from runtime.remote_access.supervisor import (
@@ -42,6 +49,11 @@ from runtime.remote_access.supervisor import (
     ConnectorConfigError,
     ConnectorSupervisor,
 )
+
+
+def _expected_systemd_credentials_directory(unit: str) -> Path:
+    """Return the only systemd staging directory trusted for ``unit``."""
+    return Path("/run/credentials") / unit
 
 _DEFAULT_CONFIG = "~/.happyranch/remote_access/config.json"
 
@@ -73,6 +85,26 @@ def build_parser() -> argparse.ArgumentParser:
     add_lifecycle("status", "print the connector service status")
     add_lifecycle("readiness", "evaluate the five readiness gates (exit 0 only when ready)")
     add_lifecycle("diagnose", "redacted local diagnostics")
+    retire = sub.add_parser("retire-enrollment-source", help=argparse.SUPPRESS)
+    retire.add_argument("--source", required=True)
+    retire.add_argument("--marker", required=True)
+    retire.add_argument("--dropin")
+    reconcile = sub.add_parser("reconcile-enrollment-retirement", help=argparse.SUPPRESS)
+    reconcile.add_argument("--source", required=True)
+    reconcile.add_argument("--marker", required=True)
+    reconcile.add_argument("--dropin", required=True)
+    fresh = sub.add_parser("prepare-fresh-enrollment", help=argparse.SUPPRESS)
+    fresh.add_argument("--source", required=True)
+    fresh.add_argument("--marker", required=True)
+    fresh.add_argument("--dropin", required=True)
+    capability = sub.add_parser("credential-capability", help=argparse.SUPPRESS)
+    capability.add_argument("--name", choices=("daemon.token", "enrollment.key"), required=True)
+    capability.add_argument(
+        "--unit",
+        choices=("happyranch-connector.service", "happyranch-tsnet-sidecar.service"),
+        required=True,
+    )
+    capability.add_argument("--consumed-marker")
 
     pair = add_lifecycle("pair", "issue a one-time pairing code for a device (Supported-DIY ceremony)")
     pair.add_argument("--device", required=True, help="human-readable device name (e.g. macbook-pro)")
@@ -106,6 +138,83 @@ def _print_json(payload: dict) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command == "retire-enrollment-source":
+        try:
+            _retire_enrollment_source(Path(args.source), Path(args.marker), dropin=Path(args.dropin) if args.dropin else None)
+            return 0
+        except OSError:
+            print("error: enrollment_source_retirement_failed", file=sys.stderr)
+            return 1
+    if args.command == "reconcile-enrollment-retirement":
+        try:
+            _reconcile_enrollment_retirement(
+                Path(args.source), Path(args.marker), dropin=Path(args.dropin)
+            )
+            return 0
+        except OSError:
+            print("error: enrollment_source_retirement_failed", file=sys.stderr)
+            return 1
+    if args.command == "prepare-fresh-enrollment":
+        try:
+            _prepare_fresh_enrollment(
+                Path(args.source), Path(args.marker), dropin=Path(args.dropin)
+            )
+            return 0
+        except OSError:
+            print("error: fresh_enrollment_transition_failed", file=sys.stderr)
+            return 1
+    if args.command == "credential-capability":
+        expected_unit = {
+            "daemon.token": "happyranch-connector.service",
+            "enrollment.key": "happyranch-tsnet-sidecar.service",
+        }[args.name]
+        if args.unit != expected_unit:
+            print("credential_staging_incompatible", file=sys.stderr)
+            return 1
+        if args.consumed_marker and (
+            args.name != "enrollment.key"
+            or not Path(args.consumed_marker).is_absolute()
+            or Path(args.consumed_marker).name != "credential.consumed"
+        ):
+            print("credential_staging_incompatible", file=sys.stderr)
+            return 1
+        credentials_directory = os.environ.get("CREDENTIALS_DIRECTORY")
+        if not credentials_directory:
+            if args.consumed_marker:
+                marker = Path(args.consumed_marker)
+                category = credential_capability(
+                    marker, expected_uid=os.geteuid(), allowed_modes=(0o600,)
+                )
+                if category == "credential_valid":
+                    return 0
+            print("credential_absent", file=sys.stderr)
+            return 1
+        expected_directory = _expected_systemd_credentials_directory(args.unit)
+        if Path(credentials_directory) != expected_directory:
+            print("credential_staging_incompatible", file=sys.stderr)
+            return 1
+        try:
+            directory_metadata = expected_directory.lstat()
+            directory_is_safe = (
+                directory_metadata.st_mode & 0o170000 == 0o040000
+                and not expected_directory.is_symlink()
+                and not os.access(expected_directory, os.W_OK)
+            )
+        except OSError:
+            directory_is_safe = False
+        if not directory_is_safe:
+            print("credential_staging_incompatible", file=sys.stderr)
+            return 1
+        category = credential_capability(
+            Path(credentials_directory) / args.name,
+            expected_uid=None,
+            allowed_modes=None,
+            require_read_only=True,
+        )
+        if category != "credential_valid":
+            print(category, file=sys.stderr)
+            return 1
+        return 0
     try:
         config = _load_config(args.config)
     except (ConnectorConfigError, json.JSONDecodeError, OSError) as exc:
@@ -195,6 +304,130 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     return 1
+
+
+def _retire_enrollment_source(
+    source: Path,
+    marker: Path,
+    *,
+    dropin: Path | None = None,
+    reload_manager: Callable[[], None] | None = None,
+) -> None:
+    """Retire the one-use source after READY; recover either side of rename."""
+    if (not source.is_absolute() or not marker.is_absolute() or source.name != "enrollment.key"
+            or marker.name != "credential.consumed" or (dropin is not None and
+            (not dropin.is_absolute() or dropin.name != "10-enrollment-credential.conf"))):
+        raise OSError("invalid retirement path")
+    retiring = source.with_name(source.name + ".retiring")
+    marker_ok = marker.is_file() and not marker.is_symlink() and marker.stat().st_mode & 0o777 == 0o600
+    if retiring.exists() or retiring.is_symlink():
+        if retiring.is_symlink() or not retiring.is_file():
+            raise OSError("invalid retirement residue")
+        if marker_ok:
+            retiring.unlink()
+        elif not source.exists():
+            retiring.replace(source)
+        else:
+            raise OSError("incoherent retirement residue")
+        _fsync_dir(source.parent)
+        if not marker_ok:
+            raise OSError("enrollment not durable")
+    if not marker_ok:
+        raise OSError("enrollment not durable")
+    if not source.exists():
+        if dropin is not None and dropin.exists():
+            dropin.unlink()
+            _fsync_dir(dropin.parent)
+            (reload_manager or _reload_systemd)()
+        return
+    st = source.lstat()
+    if source.is_symlink() or not source.is_file() or st.st_mode & 0o777 != 0o600 or st.st_uid != os.geteuid():
+        raise OSError("invalid enrollment source")
+    if dropin is not None and dropin.exists():
+        if dropin.is_symlink() or not dropin.is_file():
+            raise OSError("invalid credential dropin")
+        dropin.unlink()
+        _fsync_dir(dropin.parent)
+        (reload_manager or _reload_systemd)()
+    source.replace(retiring)
+    _fsync_dir(source.parent)
+    retiring.unlink()
+    _fsync_dir(source.parent)
+
+
+def _reconcile_enrollment_retirement(
+    source: Path, marker: Path, *, dropin: Path
+) -> None:
+    """Finish only the safe post-reload half of an interrupted retirement."""
+    if dropin.exists() or not source.exists():
+        return
+    _retire_enrollment_source(source, marker, dropin=None)
+
+
+def _prepare_fresh_enrollment(
+    source: Path,
+    marker: Path,
+    *,
+    dropin: Path,
+    reload_manager: Callable[[], None] | None = None,
+    service_is_active: Callable[[], bool] | None = None,
+) -> None:
+    """Explicitly replace consumed state after an operator installs a fresh source."""
+    if (
+        not source.is_absolute()
+        or source.name != "enrollment.key"
+        or not marker.is_absolute()
+        or marker.name != "credential.consumed"
+        or not dropin.is_absolute()
+        or dropin.name != "10-enrollment-credential.conf"
+    ):
+        raise OSError("invalid fresh enrollment path")
+    if (service_is_active or _sidecar_is_active)():
+        raise OSError("service must be stopped")
+    require_credential_capability(source, expected_uid=os.geteuid())
+    if marker.exists():
+        if marker.is_symlink() or not marker.is_file() or marker.stat().st_mode & 0o777 != 0o600:
+            raise OSError("invalid consumed marker")
+        marker.unlink()
+        _fsync_dir(marker.parent)
+    dropin.parent.mkdir(mode=0o755, exist_ok=True)
+    temporary = dropin.with_name(dropin.name + ".new")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        os.write(descriptor, b"[Service]\nLoadCredential=enrollment.key:/etc/happyranch/enrollment.key\n")
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    temporary.replace(dropin)
+    _fsync_dir(dropin.parent)
+    (reload_manager or _reload_systemd)()
+
+
+def _sidecar_is_active() -> bool:
+    try:
+        result = subprocess.run(
+            ["systemctl", "is-active", "--quiet", "happyranch-tsnet-sidecar.service"],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError as exc:
+        raise OSError("service state unavailable") from exc
+    return result.returncode == 0
+
+
+def _reload_systemd() -> None:
+    env = {key: value for key, value in os.environ.items() if key != "NOTIFY_SOCKET"}
+    subprocess.run(["systemctl", "daemon-reload"], check=True, env=env,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def _fsync_dir(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def _run_ceremony(args, supervisor: ConnectorSupervisor) -> int:
