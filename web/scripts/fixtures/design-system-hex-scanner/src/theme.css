@@ -1,3 +1,19 @@
 .fixture {
   border-color: #c0ffee;
+  color: rgb(1 2 3 / 40%);
+  background: hsl(120deg 50% 50%);
+  outline-color: rebeccapurple;
+  box-shadow: 0 1px oklab(50% 0.1 0.1);
+  width: rgb(1);
+  animation-name: red;
+  color: var(--text-primary);
+  color: var(--red);
+}
+
+.balanced {
+  color: rgb(var(--raw-rgb));
+  background-color: hsl(var(--raw-hsl) / 50%);
+  background-image: url(/assets/red.png);
+  width: red;
+  color: var(--semantic-token);
 }

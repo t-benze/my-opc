@@ -26,6 +26,8 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / "scripts" / "local_ci.sh"
+WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+COLOUR_GATE_COMMAND = "bash scripts/verify-design-system-colour-gate.sh"
 
 NODE_VERSION_FILE_VAR = "LOCAL_CI_FAKE_NODE_VERSION_FILE"
 INVOCATION_LOG_VAR = "LOCAL_CI_FAKE_INVOCATION_LOG"
@@ -130,9 +132,13 @@ def _build_tree(tmp_path: Path, declaration: str | bytes | None) -> Path:
     """Build a standalone repo-like tree with a script copy and optional .nvmrc."""
     tree = tmp_path / "repo"
     (tree / "scripts").mkdir(parents=True)
+    (tree / "web" / "scripts").mkdir(parents=True)
     script_copy = tree / "scripts" / "local_ci.sh"
     script_copy.write_text(SCRIPT.read_text())
     script_copy.chmod(0o755)
+    colour_gate = tree / "web" / "scripts" / "verify-design-system-colour-gate.sh"
+    colour_gate.write_text("#!/usr/bin/env bash\nexit 0\n")
+    colour_gate.chmod(0o755)
     if declaration is not None:
         nvmrc = tree / ".nvmrc"
         if isinstance(declaration, bytes):
@@ -204,6 +210,51 @@ def test_web_permits_valid_node_24_and_runs_commands(tmp_path: Path) -> None:
     assert "npx vitest run" in log
     # The web target must not run any Python work.
     assert "uv" not in log
+
+
+def test_unlisted_production_colour_fails_both_shipping_web_entrypoints(
+    tmp_path: Path,
+) -> None:
+    """Local web/all and GitHub Web share the same fail-closed scanner seam."""
+    local_ci = SCRIPT.read_text()
+    workflow = WORKFLOW.read_text()
+    assert local_ci.count(COLOUR_GATE_COMMAND) == 1
+    assert workflow.count(f"run: {COLOUR_GATE_COMMAND}") == 1
+
+    source_root = tmp_path / "src"
+    source_root.mkdir()
+    (source_root / "DeliberateViolation.tsx").write_text(
+        'export const violation = <div className="text-rose-600" />\n'
+    )
+    allowlist = tmp_path / "allowlist.tsv"
+    allowlist.write_text("")
+    scanner_env = {
+        "DESIGN_SYSTEM_SOURCE_ROOT": str(source_root),
+        "DESIGN_SYSTEM_HEX_ALLOWLIST": str(allowlist),
+    }
+
+    for target in ("web", "all"):
+        target_root = tmp_path / target
+        target_root.mkdir()
+        bin_dir, version_file, log_file = _setup_fake_env(
+            target_root, "v24.0.0"
+        )
+        local_result = _run_local_ci(
+            target, bin_dir, version_file, log_file, scanner_env
+        )
+        assert local_result.returncode == 3
+        assert "unlisted hit: DeliberateViolation.tsx" in local_result.stderr
+        assert "npm run lint" not in log_file.read_text()
+
+    github_result = subprocess.run(
+        ["bash", "scripts/verify-design-system-colour-gate.sh"],
+        cwd=REPO_ROOT / "web",
+        env={**os.environ, **scanner_env},
+        capture_output=True,
+        text=True,
+    )
+    assert github_result.returncode == 3
+    assert "unlisted hit: DeliberateViolation.tsx" in github_result.stderr
 
 
 def test_all_permits_valid_node_24_and_runs_python_then_web(tmp_path: Path) -> None:
@@ -363,7 +414,6 @@ def test_valid_declaration_accepted(tmp_path: Path, declaration: str) -> None:
     # The declaration accepts only the bare byte token "24" or "24\n"; both
     # must pass the guard and let the web target run the fake npm/npx shims.
     tree = _build_tree(tmp_path, declaration)
-    (tree / "web").mkdir()
     bin_dir, version_file, log_file = _setup_fake_env(tmp_path, "v24.0.0")
     result = _run_in_tree(tree, "web", bin_dir, version_file, log_file)
 

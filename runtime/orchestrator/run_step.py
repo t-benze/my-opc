@@ -671,6 +671,32 @@ def _consume_completion_report(
                 orch, task_id, status=TaskStatus.FAILED, auto_revisit_spawned=False,
             )
             return
+        if task.dispatched_from_thread_id:
+            reason = (
+                "manager supersession rejected: thread-origin roots are not "
+                "eligible for supersession; founder action required"
+            )
+            if db.try_reject_thread_origin_manager_supersede(
+                task_id,
+                actor_agent=agent,
+                actor_session_id=task.current_session_id,
+                expected_team=task.team,
+                reason=reason,
+                reason_code=(
+                    "runtime_manager_supersession_thread_origin_ineligible"
+                ),
+            ):
+                orch.notify_escalated(
+                    task_id=task_id,
+                    agent=agent,
+                    reason=reason,
+                    last_summary=report.output_summary,
+                )
+                _maybe_post_thread_escalation(orch, task_id, reason=reason)
+            # A cancellation or another terminal consumer may have won the
+            # CAS. In either case, never reinterpret that race as permission
+            # to create a successor.
+            return
         successor_id = db.try_manager_supersede(
             task_id,
             actor_agent=agent,

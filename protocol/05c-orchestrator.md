@@ -64,7 +64,7 @@ The orchestrator is the application code that ties everything together. It spawn
 
 **6. Assembles agent context.** Before each session, the orchestrator gathers the system prompt, learnings file, team health, and task-specific context, then writes them into the agent's workspace in the format expected by the configured executor.
 
-**Manager root supersession (THR-152 phase 1).** The `supersede` completion decision is a standard, always-available manager action. It is a same-manager, same-team, currently claimed root replacement with a nonblank successor brief, rationale, and strict manager-supplied `attestation`; it has no arbitrary task-id/API/CLI/dashboard surface. The compact attestation contains a nonblank recovery reason plus affirmative declarations covering policy/product intent, budget/external commitment, permission/cross-team, schema/auth/security/privacy/data access, and unresolved Founder gates. The decision and nested attestation reject missing, malformed, nested-extra, blank, mixed/override, and explicit contrary declarations before mutation. This is structural validation of the supplied evidence only: it is not proof that declarations are true, cannot detect a valid-looking false declaration, and does not infer authority from prose. Managers MUST escalate the named categories rather than supersede them; that policy obligation is distinct from postmortem audit evidence. A dedicated append-only relation stores the rationale, literal briefs, SHA-256 hashes, actor/session/rule-versioned JSON attestation evidence, and bidirectional audit records in the same transaction as predecessor `superseded` and successor `pending`. It is informational only: no Founder escalation, approval, or notification is emitted. Phase 1 rejects every root with a nonempty `dispatched_from_thread_id` before any mutation; thread-origin traversal/dispatch integration is explicitly deferred to phase 2.
+**Manager root supersession (THR-152 phase 1).** The `supersede` completion decision is a standard, always-available manager action. It is a same-manager, same-team, currently claimed root replacement with a nonblank successor brief, rationale, and strict manager-supplied `attestation`; it has no arbitrary task-id/API/CLI/dashboard surface. The compact attestation contains a nonblank recovery reason plus affirmative declarations covering policy/product intent, budget/external commitment, permission/cross-team, schema/auth/security/privacy/data access, and unresolved Founder gates. The decision and nested attestation reject missing, malformed, nested-extra, blank, mixed/override, and explicit contrary declarations before mutation. This is structural validation of the supplied evidence only: it is not proof that declarations are true, cannot detect a valid-looking false declaration, and does not infer authority from prose. Managers MUST escalate the named categories rather than supersede them; that policy obligation is distinct from postmortem audit evidence. A dedicated append-only relation stores the rationale, literal briefs, SHA-256 hashes, actor/session/rule-versioned JSON attestation evidence, and bidirectional audit records in the same transaction as predecessor `superseded` and successor `pending`. A successful supersession is informational only: no Founder escalation, approval, or notification is emitted. Phase 1 rejects every root with a nonempty `dispatched_from_thread_id` before any supersession mutation; thread-origin traversal/dispatch integration is explicitly deferred to phase 2. If such a structurally valid decision reaches the runtime consumer, a dedicated transaction revalidates the complete currently claimed manager root/session and thread-origin predicate before atomically committing the existing runtime-raised escalation and audit denominator. Predicate loss is a silent no-op, preserving any competing continuation, block, or cancellation without escalation, notification, authority-hook, or thread projection. A successful rejection terminalizes the orchestration attempt without creating a successor, so startup and zombie recovery cannot replay the unchanged decision.
 
 **7. Provides the founder dashboard.** Aggregates audit logs, escalation summaries, and team health metrics into a weekly report.
 
@@ -373,8 +373,9 @@ through the S1 store's sealed CAS, exact replay, stale-epoch, same-team, audit,
 and older-version rollback checks without exposing guessed release existence
 as a distinct oracle. Shipping the route is not production activation.
 
-**S6b/S7 projection and activation.** The authenticated Engineering
-Manager surface exposes bounded stable snapshot/keyset pagination, with opaque
+**S6b/S7 projection and activation.** The eligible Engineering Manager Agent
+detail exposes only a compact entry/status card. Its dedicated authenticated
+org/agent-scoped policy route exposes bounded stable snapshot/keyset pagination, with opaque
 independent cursors and deterministic tie-breakers, for immutable release and
 activation receipts plus secret-free self-evaluation outcomes. Concurrent
 newer inserts are outside the initial traversal snapshot and cannot shift,
@@ -1327,6 +1328,26 @@ existing THR-090 zombie-reaper lifecycle evidence plus immediate fail-closed
 OS process/cwd/open-file checks; Git/repository evidence remains a skip rule.
 Small daemon callback payload contracts are unchanged.
 
+THR-195 B1 also defines a dormant `task_scratch_reclamation` engine imported
+only by tests. Its executor accepts immutable finalized ledger rows rather than
+manifest paths or candidate lists, and performs literal-root fd-relative
+no-follow same-device removal with exact allocated-byte/inode accounting and
+protected parent/manifest/lock/sibling postconditions. Sealing accepts explicit
+caller-constructible lifecycle/liveness/current-boot coverage assertion shapes
+with no permissive defaults and rejects missing, malformed, stale-boot, truncated,
+ambiguous, unsupported-platform, recovery/job/live-reference, unavailable, or
+internally inconsistent values. These inputs are untrusted: B1 neither proves
+their provenance nor supplies authoritative producers; those integrations are
+deferred to B2/B3. Sealing also enforces the 60-second newest-mtime floor.
+Pathname removal follows verified parent/root identity and complete sibling/
+directory-entry checks; every detected pre-action mismatch fails with zero
+reclaimed claims. Portable POSIX unlink/rmdir is not inode-bound, so B1 excludes
+a deliberately hostile same-UID replacement in the final identity-check-to-
+pathname-syscall window and does not promise that replacement survives.
+Git/worktree/bare-repository ancestor or descendant evidence fails closed. B1
+adds no teardown/scheduler caller, activation, deployment, live deletion, or
+legacy-backlog eligibility.
+
 1. **Measures** the OWNING AGENT's workspace with an explicit bounded,
    fail-open budget: one true wall-clock deadline shared across all
    collection — each git subprocess receives ``min(per-call cap, remaining
@@ -1343,11 +1364,17 @@ Small daemon callback payload contracts are unchanged.
    lifetimes. It preserves one run at a time (a later
    occurrence fires only after the preceding cleanup task of that agent is
    terminal — TASK-5552 §3), a seven-day per-agent cooldown, and the
-   founder threshold: trigger only when the agent's workspace totals
-   >= 1 GiB. Below-threshold state is audited once at that meaningful
+   1 GiB founder threshold. A bounded timeout, error, or cap/truncation result
+   that makes measurement unavailable bypasses only numeric threshold
+   evaluation, so otherwise-due spawning continues with honest unavailable
+   advisory context; only an available numeric result below 1 GiB skips.
+   Below-threshold state is audited once at that meaningful
    weekly/cooldown boundary, not once per minute for the rest of the week;
-   measurement-unavailable and other exceptional/fail-closed trigger skips
-   remain explicitly audited when the boundary is attempted. A decision-level
+   measurement-unavailable fails open around the numeric threshold gate, so an
+   otherwise-eligible task spawns with unavailable advisory and trigger-audit
+   context; an available numeric below-threshold result skips and remains
+   audited. Other exceptional/fail-closed trigger skips remain explicitly
+   audited. A decision-level
    task-history lookup failure before trigger entry creates no cleanup task and
    emits exactly one ``workspace_cleanup_skipped(history_indeterminate)`` row
    for the crossed boundary; adjacent non-boundary scans remain silent.

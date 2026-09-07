@@ -3760,6 +3760,26 @@ class Database:
         self._conn.commit()
         return cursor.rowcount == 1
 
+    def _has_live_manager_supersession_family_work_uncommitted(
+        self, task_id: str,
+    ) -> bool:
+        """Return whether a supersession family retains live task/job work."""
+        return self._conn.execute(
+            """WITH RECURSIVE family(id) AS (
+                   SELECT ?
+                   UNION ALL
+                   SELECT t.id FROM tasks t JOIN family f ON t.parent_task_id = f.id
+               )
+               SELECT 1 FROM tasks
+                WHERE id IN family AND id != ?
+                  AND status NOT IN ('completed', 'failed', 'cancelled', 'superseded')
+               UNION ALL
+               SELECT 1 FROM jobs
+                WHERE task_id IN family AND status IN ('pending', 'running')
+               LIMIT 1""",
+            (task_id, task_id),
+        ).fetchone() is not None
+
     @_synchronized
     def try_manager_supersede(
         self,
@@ -3798,22 +3818,7 @@ class Database:
             ):
                 self._conn.rollback()
                 return None
-            live_work = self._conn.execute(
-                """WITH RECURSIVE family(id) AS (
-                       SELECT ?
-                       UNION ALL
-                       SELECT t.id FROM tasks t JOIN family f ON t.parent_task_id = f.id
-                   )
-                   SELECT 1 FROM tasks
-                    WHERE id IN family AND id != ?
-                      AND status NOT IN ('completed', 'failed', 'cancelled', 'superseded')
-                   UNION ALL
-                   SELECT 1 FROM jobs
-                    WHERE task_id IN family AND status IN ('pending', 'running')
-                   LIMIT 1""",
-                (task_id, task_id),
-            ).fetchone()
-            if live_work is not None:
+            if self._has_live_manager_supersession_family_work_uncommitted(task_id):
                 self._conn.rollback()
                 return None
             predecessor = row["id"]
@@ -3886,6 +3891,78 @@ class Database:
                 )
             self._conn.commit()
             return successor_id
+        except Exception:
+            self._conn.rollback()
+            raise
+
+    @_synchronized
+    def try_reject_thread_origin_manager_supersede(
+        self,
+        task_id: str,
+        *,
+        actor_agent: str,
+        actor_session_id: str,
+        expected_team: str,
+        reason: str,
+        reason_code: str,
+    ) -> bool:
+        """Atomically escalate one currently claimed, thread-origin manager root.
+
+        This is the ineligible counterpart to ``try_manager_supersede``.  Its
+        complete claim predicate is evaluated under the same transaction as
+        the state and audit writes, so a competing continuation, block, or
+        cancellation wins without any rejection side effects.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        try:
+            self._conn.execute("BEGIN IMMEDIATE")
+            if self._has_live_manager_supersession_family_work_uncommitted(task_id):
+                self._conn.rollback()
+                return False
+            cursor = self._conn.execute(
+                """UPDATE tasks
+                   SET status = ?, block_kind = NULL, note = ?, updated_at = ?
+                   WHERE id = ?
+                     AND status = 'in_progress'
+                     AND block_kind IS NULL
+                     AND cancelled_at IS NULL
+                     AND task_type = 'task'
+                     AND parent_task_id IS NULL
+                     AND assigned_agent = ?
+                     AND team = ?
+                     AND current_session_id = ?
+                     AND active_chain IS NULL
+                     AND active_fanout IS NULL
+                     AND blocked_on_job_ids IS NULL
+                     AND dispatched_from_thread_id IS NOT NULL
+                     AND dispatched_from_thread_id != ''""",
+                (
+                    TaskStatus.ESCALATED.value, reason, now, task_id,
+                    actor_agent, expected_team, actor_session_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                self._conn.rollback()
+                return False
+            escalation_audit_id = self.insert_audit_log_uncommitted(
+                task_id=task_id,
+                agent=actor_agent,
+                action="escalation",
+                payload={"reason": reason},
+            )
+            self.insert_audit_log_uncommitted(
+                task_id=task_id,
+                agent=actor_agent,
+                action="authority_hook",
+                payload={
+                    "outcome": "not_applicable",
+                    "reason_code": reason_code,
+                    "reason": "runtime-raised escalation is not an authority decision",
+                    "causal_escalation_audit_id": escalation_audit_id,
+                },
+            )
+            self._conn.commit()
+            return True
         except Exception:
             self._conn.rollback()
             raise

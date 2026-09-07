@@ -10,9 +10,20 @@ Feature compositions keep using the stable `@/design-system/...` import paths.
   lockup. Its explicit light/dark values are held to at least 4.5:1 against
   the live Sidebar (`bg-bg-subtle`) and Onboarding (`bg-surface-canvas`)
   backgrounds; it is intentionally distinct from the generic UI accent.
-  Components and stories consume semantic utilities; the branch-aware check in
-  `scripts/verify-design-system.sh` rejects newly added CSS-like hex values
-  elsewhere without confusing issue references such as `#302` for colors.
+  Components and stories consume semantic utilities. The deterministic
+  full-production-tree check in `scripts/verify-design-system.sh` rejects raw
+  hex, actual default Tailwind palette scales and special colour utilities,
+  arbitrary Tailwind colour values,
+  CSS `rgb()`/`rgba()`/`hsl()`/`hsla()`/`oklch()`/`oklab()`/`color()` values,
+  and complete named CSS colour values outside that authority. Supported
+  colour functions are balanced and may contain nested channel functions such
+  as `var()`. It recognizes only
+  colour-capable utilities, properties, and JSX attributes, so issue references,
+  entities, non-colour arbitrary utilities, and token utilities are not hits.
+  The exact path/line/column/value/reason baseline is shrinking: moving,
+  changing, duplicating, adding, or deleting a listed occurrence fails until
+  the baseline is deliberately reconciled in review. A baseline row records
+  temporary residue; it does not create visual or token authority.
 - Primitives wrap basic interaction and Radix behavior. Patterns combine them
   into reusable product language. Layouts own reusable geometry.
 - Components are pure props-in/events-out unless a documented role requires an
@@ -152,7 +163,7 @@ visibility through titles, docs, controls, and representative renders.
 ## Deterministic verification and acceptance
 
 `scripts/verify-design-system.sh` runs typecheck, lint, unit coverage, the static
-Storybook build, and no-new-raw-hex enforcement. `scripts/local_ci.sh web|all` and the
+Storybook build, and full-tree raw-colour enforcement. `scripts/local_ci.sh web|all` and the
 GitHub Web gate explicitly run SPA and Storybook builds once each. Storybook is
 not a product prebuild hook, preventing duplicate builds.
 

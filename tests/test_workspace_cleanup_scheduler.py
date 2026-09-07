@@ -41,6 +41,52 @@ from runtime.models import (
 from runtime.orchestrator.orchestrator import Orchestrator
 from runtime.orchestrator.teams import TeamsRegistry
 
+
+def test_fail_open_threshold_contract_is_consistent_across_normative_surfaces():
+    """Normative summaries distinguish unavailable from numeric measurements."""
+    root = Path(__file__).parents[1]
+    surfaces = {
+        "CLAUDE.md": (root / "CLAUDE.md").read_text(),
+        "scheduler module": (
+            root / "runtime/daemon/workspace_cleanup_scheduler.py"
+        ).read_text(),
+        "agent runtime protocol": (
+            root / "protocol/05b-agent-runtime.md"
+        ).read_text(),
+        "orchestrator protocol": (
+            root / "protocol/05c-orchestrator.md"
+        ).read_text(),
+    }
+
+    normalized = {
+        name: " ".join(source.split()) for name, source in surfaces.items()
+    }
+    for name, source in normalized.items():
+        assert "bypasses only numeric threshold evaluation" in source, name
+        assert "otherwise-due spawning continues" in source, name
+        assert "honest unavailable advisory context" in source, name
+        assert (
+            "only an available numeric result below 1 GiB skips" in source
+        ), name
+
+    obsolete_claims = {
+        "CLAUDE.md": "and the agent's workspace totals >= 1 GiB, triggers",
+        "scheduler module": (
+            "trigger only when that agent's workspace total is >= 1 GiB"
+        ),
+        "agent runtime protocol": (
+            "agent's workspace totals >= 1 GiB "
+            "(founder-approved defaults, TASK-6036), triggers"
+        ),
+        "orchestrator protocol": (
+            "founder threshold: trigger only when the agent's workspace totals "
+            ">= 1 GiB"
+        ),
+    }
+    for name, claim in obsolete_claims.items():
+        assert claim not in normalized[name], name
+
+
 # ── helpers ──────────────────────────────────────────────────────────────
 
 def _fmt(n: int) -> str:
@@ -410,18 +456,38 @@ async def test_trigger_routes_to_owning_agent(tmp_path, test_settings, monkeypat
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("reason", "truncated", "expected_note"),
+    [
+        (
+            "measurement deadline exceeded",
+            True,
+            "measurement truncated/unavailable",
+        ),
+        (
+            "workspace could not be measured (unreadable)",
+            False,
+            "measurement unavailable",
+        ),
+        (
+            "workspace cardinality cap exceeded",
+            True,
+            "measurement truncated/unavailable",
+        ),
+    ],
+)
 async def test_trigger_fail_open_when_measurement_unavailable(
-    tmp_path, test_settings, monkeypatch,
+    tmp_path, test_settings, monkeypatch, reason, truncated, expected_note,
 ):
-    """An unavailable measurement is an explicit audit skip — never a task,
-    never a crash, never a block on daemon operation."""
+    """Every bounded-unavailable class still creates a task whose advisory
+    note honestly carries the unavailable/truncated reason."""
     db = Database(tmp_path / "db.sqlite")
     org = _org_with_workspaces(tmp_path, db, test_settings)
 
     monkeypatch.setattr(
         wcs, "measure_workspace_context",
         lambda *a, **kw: wcs.WorkspaceContextSnapshot(
-            available=False, reason="measurement deadline exceeded",
+            available=False, reason=reason, truncated=truncated,
         ),
     )
     state = _FakeDaemonState()
@@ -429,13 +495,213 @@ async def test_trigger_fail_open_when_measurement_unavailable(
         org, agent="dev_agent",
         enqueue=lambda slug, tid: state.queue.enqueue(slug, tid),
     )
-    assert task_id is None
-    assert state.queue.items == []
-    audits = db.get_audit_logs("workspace-cleanup:skipped")
+    assert task_id is not None
+    assert state.queue.items == [("test", task_id)]
+    task = db.get_task(task_id)
+    assert expected_note in task.brief
+    assert reason in task.brief
+    assert "No sizing data was packed" in task.brief
+    assert "workspace total:" not in task.brief
+    audits = db.get_audit_logs(task_id)
     assert any(
-        r["action"] == "workspace_cleanup_skipped"
-        and r["payload"].get("reason") == "measurement_unavailable"
+        r["action"] == "workspace_cleanup_triggered"
+        and r["payload"].get("measurement_available") is False
+        and r["payload"].get("measurement_reason") == reason
+        and r["payload"].get("measurement_truncated") is truncated
         for r in audits
+    )
+
+
+@pytest.mark.asyncio
+async def test_due_scheduler_tick_spawns_when_measurement_is_unavailable(
+    tmp_path, test_settings, monkeypatch,
+):
+    """The shipping decision→tick→trigger path must not reinterpret an
+    unavailable size as a failed numeric threshold comparison."""
+    db = Database(tmp_path / "db.sqlite")
+    org = _org_with_workspaces(tmp_path, db, test_settings)
+    cfg_path = org.root / "org" / "config.yaml"
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg_path.write_text("timezone: UTC\n")
+    monkeypatch.setattr(
+        wcs, "measure_workspace_context",
+        lambda *a, **kw: wcs.WorkspaceContextSnapshot(
+            available=False,
+            reason="workspace measurement did not complete within bounded limits "
+            "(deadline exceeded)",
+            truncated=True,
+        ),
+    )
+    state = _FakeDaemonState()
+    state.orgs = {"test": org}
+    occurrence = _sunday_0330_utc()
+
+    await wcs._tick_org(
+        org,
+        state,
+        now_utc=occurrence,
+        previous_scan_utc=occurrence - timedelta(seconds=1),
+    )
+
+    assert len(state.queue.items) == 2
+    tasks = [db.get_task(task_id) for _, task_id in state.queue.items]
+    assert {task.assigned_agent for task in tasks} == {
+        "dev_agent", "qa_engineer",
+    }
+    assert all(
+        "measurement truncated/unavailable" in task.brief for task in tasks
+    )
+    assert all("deadline exceeded" in task.brief for task in tasks)
+
+
+@pytest.mark.asyncio
+async def test_due_tick_spawns_when_partial_traversal_is_unreadable(
+    tmp_path, test_settings, monkeypatch,
+):
+    """A traversal error invalidates already-counted totals at the shipping
+    tick seam, so a partial size can never suppress an otherwise-due run."""
+    db = Database(tmp_path / "db.sqlite")
+    org = _org_with_workspaces(tmp_path, db, test_settings)
+    cfg_path = org.root / "org" / "config.yaml"
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg_path.write_text("timezone: UTC\n")
+    workspace = org.root / "workspaces" / "dev_agent"
+    _write_file(workspace / "readable.txt", 100)
+    unreadable = workspace / "unreadable"
+    unreadable.mkdir()
+
+    real_scandir = wcs.os.scandir
+
+    def partly_unreadable_scandir(path):
+        if Path(path) == unreadable:
+            raise PermissionError("permission denied")
+        return real_scandir(path)
+
+    monkeypatch.setattr(wcs.os, "scandir", partly_unreadable_scandir)
+    state = _FakeDaemonState()
+    occurrence = _sunday_0330_utc()
+
+    await wcs._tick_org(
+        org,
+        state,
+        now_utc=occurrence,
+        previous_scan_utc=occurrence - timedelta(seconds=1),
+    )
+
+    assert len(state.queue.items) == 1
+    task = db.get_task(state.queue.items[0][1])
+    assert task is not None
+    assert task.assigned_agent == "dev_agent"
+    assert "measurement unavailable" in task.brief
+    assert "workspace could not be measured (unreadable)" in task.brief
+    assert "No sizing data was packed" in task.brief
+    assert "workspace total:" not in task.brief
+    skipped = db.get_audit_logs("workspace-cleanup:skipped")
+    assert not any(
+        row["payload"].get("reason") == "workspace_below_threshold"
+        and row["agent"] == "dev_agent"
+        for row in skipped
+    )
+    triggered = db.get_audit_logs(task.id)
+    assert any(
+        row["action"] == "workspace_cleanup_triggered"
+        and row["payload"].get("measurement_available") is False
+        and row["payload"].get("measurement_reason")
+        == "workspace could not be measured (unreadable)"
+        and row["payload"].get("measurement_truncated") is False
+        for row in triggered
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failing_method", ["is_symlink", "is_dir", "stat"])
+@pytest.mark.parametrize("partial_count", [False, True])
+async def test_due_tick_spawns_when_entry_metadata_is_unreadable(
+    tmp_path, test_settings, monkeypatch, failing_method, partial_count,
+):
+    """Every caught DirEntry metadata failure invalidates zero/partial totals
+    through the real walk, measurement, trigger, and due-tick shipping seams.
+    """
+    db = Database(tmp_path / "db.sqlite")
+    org = _org_with_workspaces(tmp_path, db, test_settings)
+    cfg_path = org.root / "org" / "config.yaml"
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg_path.write_text("timezone: UTC\n")
+    workspace = org.root / "workspaces" / "dev_agent"
+    if partial_count:
+        _write_file(workspace / "a-readable.txt", 100)
+    _write_file(workspace / "z-failure-target", 200)
+
+    real_scandir = wcs.os.scandir
+
+    class FailingEntry:
+        def __init__(self, entry):
+            self._entry = entry
+
+        def __getattr__(self, name):
+            return getattr(self._entry, name)
+
+        def is_symlink(self):
+            if failing_method == "is_symlink":
+                raise PermissionError("metadata permission denied")
+            return self._entry.is_symlink()
+
+        def is_dir(self, *, follow_symlinks=True):
+            if failing_method == "is_dir":
+                raise PermissionError("metadata permission denied")
+            return self._entry.is_dir(follow_symlinks=follow_symlinks)
+
+        def stat(self, *, follow_symlinks=True):
+            if failing_method == "stat":
+                raise PermissionError("metadata permission denied")
+            return self._entry.stat(follow_symlinks=follow_symlinks)
+
+    class OrderedScandir:
+        def __init__(self, path):
+            self._context = real_scandir(path)
+
+        def __enter__(self):
+            entries = sorted(self._context.__enter__(), key=lambda entry: entry.name)
+            return iter([
+                FailingEntry(entry) if entry.name == "z-failure-target" else entry
+                for entry in entries
+            ])
+
+        def __exit__(self, *args):
+            return self._context.__exit__(*args)
+
+    monkeypatch.setattr(wcs.os, "scandir", OrderedScandir)
+    state = _FakeDaemonState()
+    occurrence = _sunday_0330_utc()
+
+    await wcs._tick_org(
+        org,
+        state,
+        now_utc=occurrence,
+        previous_scan_utc=occurrence - timedelta(seconds=1),
+    )
+
+    assert len(state.queue.items) == 1
+    task = db.get_task(state.queue.items[0][1])
+    assert task is not None
+    assert "measurement unavailable" in task.brief
+    assert "workspace could not be measured (unreadable)" in task.brief
+    assert "No sizing data was packed" in task.brief
+    assert "workspace total:" not in task.brief
+    skipped = db.get_audit_logs("workspace-cleanup:skipped")
+    assert not any(
+        row["payload"].get("reason") == "workspace_below_threshold"
+        and row["agent"] == "dev_agent"
+        for row in skipped
+    )
+    triggered = db.get_audit_logs(task.id)
+    assert any(
+        row["action"] == "workspace_cleanup_triggered"
+        and row["payload"].get("measurement_available") is False
+        and row["payload"].get("measurement_reason")
+        == "workspace could not be measured (unreadable)"
+        and "workspaces_bytes" not in row["payload"]
+        for row in triggered
     )
 
 
@@ -714,6 +980,7 @@ def test_measure_deadline_produces_unavailable_note(tmp_path, monkeypatch):
     monkeypatch.setattr(wcs.time, "monotonic", _Clock())
     snap = wcs.measure_workspace_context(ws, db=db, sessions=None)
     assert snap.available is False
+    assert snap.truncated is True
     assert snap.reason is not None
 
 
@@ -770,6 +1037,7 @@ def test_measure_bounds_git_timeout_by_remaining_deadline_and_marks_unavailable(
     # clock is 1009, so remaining = 1.0 → min(5.0, 1.0) = 1.0).
     assert git_timeouts == [5.0, 1.0]
     assert snap.available is False
+    assert snap.truncated is True
     assert "bounded limits" in (snap.reason or "")
 
 
@@ -800,6 +1068,7 @@ def test_measure_expiry_after_last_repo_marks_unavailable(tmp_path, monkeypatch)
         ws, db=db, sessions=None, deadline_seconds=10.0,
     )
     assert snap.available is False
+    assert snap.truncated is True
     assert "bounded limits" in (snap.reason or "")
 
 
@@ -814,6 +1083,7 @@ def test_measure_repo_cap_hit_marks_unavailable(tmp_path, monkeypatch):
     monkeypatch.setattr(wcs, "_git_worktree_paths", lambda repo_dir, timeout: ([], False))
     snap = wcs.measure_workspace_context(ws, db=db, sessions=None)
     assert snap.available is False
+    assert snap.truncated is True
     assert "bounded limits" in (snap.reason or "")
 
 
@@ -828,6 +1098,7 @@ def test_measure_worktree_cap_hit_marks_unavailable(tmp_path, monkeypatch):
     monkeypatch.setattr(wcs.subprocess, "run", runner)
     snap = wcs.measure_workspace_context(ws, db=db, sessions=None)
     assert snap.available is False
+    assert snap.truncated is True
     assert "bounded limits" in (snap.reason or "")
 
 

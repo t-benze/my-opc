@@ -469,8 +469,9 @@ The signed architecture is at
 **THR-181 S6b/S7 manager runtime visibility.** A newly launched eligible
 Engineering Manager remains the semantic evaluator for its own proposed
 decision; no separate production evaluator process is launched. The manager
-Agent page may read only bounded secret-free immutable history and durable
-outcome receipts, with missing causal linkage explicitly marked
+Agent detail shows only a compact eligible entry/status card. Its dedicated
+org/agent-scoped policy page may read only bounded secret-free immutable history
+and durable outcome receipts, with missing causal linkage explicitly marked
 `receipt_incomplete`. Workers and other managers receive no API or DOM surface.
 Code landing/redeploy and explicit founder-authorized production activation are
 separate events; activation retains the ordinary daemon mechanical fences.
@@ -1220,14 +1221,19 @@ Schedules. The daemon runs a periodic loop
 ``runtime/daemon/app.py``) that measures EACH AGENT's own workspace on a
 bounded, fail-open budget and, per agent, when the weekly occurrence is due
 and unserviced, no prior cleanup task of that agent is non-terminal, the
-seven-day per-agent cooldown has elapsed, and the agent's workspace totals
->= 1 GiB (founder-approved defaults, TASK-6036), triggers an ordinary root
-task ASSIGNED TO THAT OWNING AGENT with a **daemon-composed brief** that
+seven-day per-agent cooldown has elapsed, triggers an ordinary root task
+ASSIGNED TO THAT OWNING AGENT with a **daemon-composed brief** that
 packs the fresh measurement as **ADVISORY** context at trigger time. It never
 uses, creates, or modifies a Schedule, never injects anything into the shared
 session-prompt seam (``protocol_doc_manifest``), and never performs cleanup
 itself. Ordinary task, thread, wake, dream, and Schedule-spawned sessions are
 byte-identical to a runtime without the feature.
+
+A bounded timeout, error, or cap/truncation result that makes measurement
+unavailable bypasses only numeric threshold evaluation, so otherwise-due
+spawning continues with honest unavailable advisory context. Of available
+numeric results, only an available numeric result below 1 GiB skips
+(founder-approved threshold, TASK-6036).
 
 The packed block is advisory sizing context ONLY. It is **stale on arrival**,
 is **not an eligibility list** and **not a candidate list**, labels no path
@@ -1256,8 +1262,11 @@ there is no earlier historical backfill across daemon lifetimes.
 Below-threshold state therefore
 emits one ``workspace_cleanup_skipped(workspace_below_threshold)`` audit at a
 meaningful weekly/cooldown boundary, never once per minute for the rest of an
-unserviced week. Measurement-unavailable and the other exceptional/fail-closed
-trigger skips remain explicitly audited when that boundary is attempted. A
+unserviced week. Measurement-unavailable fails open around the numeric
+threshold gate, so an otherwise-eligible task spawns with unavailable advisory
+and trigger-audit context; an available numeric below-threshold result skips
+and remains audited. The other exceptional/fail-closed trigger skips remain
+explicitly audited. A
 decision-level task-history lookup failure before trigger entry creates no
 cleanup task and emits exactly one
 ``workspace_cleanup_skipped(history_indeterminate)`` row for the crossed
@@ -1314,6 +1323,24 @@ to shared ``/tmp``; same-UID post-validation races remain because the
 workspace is not an OS isolation boundary. The daemon still never inspects or
 reclaims ``/tmp``.
 Small atomic daemon callback payloads retain their explicit ``/tmp`` contracts.
+
+THR-195 B1 adds a dormant, production-unreferenced engine whose executor
+accepts only immutable final ledger rows derived from canonical manifests plus
+explicit caller-constructible lifecycle, liveness, and current-boot coverage
+assertion shapes with no permissive defaults. Validation rejects missing,
+malformed, stale-boot, truncated, ambiguous, unsupported-platform,
+recovery/job/live-reference, unavailable, or internally inconsistent values,
+but establishes no provenance or external authority; authoritative producers are
+deferred to B2/B3. It also applies the 60-second newest-mtime floor. It rejects
+Git/worktree/bare-repository ancestor or descendant evidence
+and performs fd-relative no-follow same-device pathname removal after verified
+parent/root identity checks, with complete directory-entry/sibling postconditions
+and exact accounting. Detected pre-action identity mismatches fail with zero
+reclaimed claims. POSIX unlink/rmdir is not inode-bound, so the portable threat
+contract excludes a deliberately hostile same-UID replacement in the final
+identity-check-to-pathname-syscall window and does not promise its preservation.
+No production path imports it; teardown/scheduler wiring, activation, live
+deletion, deployment, and legacy backlog eligibility remain absent.
 Runtime-launched task-agent and job subprocesses instead receive one canonical
 mode-0700 root at
 ``<workspace>/.happyranch/task-tmp/<canonical TASK-N>`` through ``TMPDIR``,

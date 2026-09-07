@@ -12,7 +12,9 @@ design and `web/DESIGN_SYSTEM.md` for the design-system migration plan.
 2. **`src/design-system/`** — Code-owned design system. Replaces the previous
    `src/components/` folder. Splits into:
    - **`tokens/tokens.css`** — single `@theme` block. Tailwind v4 derives all
-     utilities from these CSS custom properties. The only file with hex codes.
+     utilities from these CSS custom properties. It is the only raw-colour
+     definition authority; the full production-tree scanner holds any legacy
+     raw colour outside it to an exact, shrinking occurrence baseline.
    - **`primitives/`** — shadcn/ui-style components (Button, Dialog, …).
      Pure UI; allowed to import `@/lib/utils` only.
    - **`patterns/`** _(future)_ — composites of primitives (AgentChip,

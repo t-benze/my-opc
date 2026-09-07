@@ -265,7 +265,7 @@ def _insert_task_result(db: Database, task_id: str, agent: str,
 def test_zombie_consumer_rejects_thread_originated_manager_supersession(
     tmp_path, monkeypatch,
 ):
-    """The zombie path must use the same phase-1 completion guard."""
+    """The zombie path durably escalates the phase-1 rejection once."""
     import json
 
     from runtime.config import Settings
@@ -323,9 +323,27 @@ def test_zombie_consumer_rejects_thread_originated_manager_supersession(
         orch,
     )
 
-    assert db.get_task("T-ZOMBIE-SUP").status is TaskStatus.IN_PROGRESS
+    task = db.get_task("T-ZOMBIE-SUP")
+    assert task.status is TaskStatus.ESCALATED
+    assert task.note == (
+        "manager supersession rejected: thread-origin roots are not eligible "
+        "for supersession; founder action required"
+    )
     assert db.execute("SELECT COUNT(*) FROM manager_supersessions").fetchone()[0] == 0
     orch._queue.put_nowait.assert_not_called()
+    logs = db.get_audit_logs("T-ZOMBIE-SUP")
+    assert [row["action"] for row in logs].count("orchestration_step") == 1
+    assert [row["action"] for row in logs].count("escalation") == 1
+    authority = next(row for row in logs if row["action"] == "authority_hook")
+    assert authority["payload"]["reason_code"] == (
+        "runtime_manager_supersession_thread_origin_ineligible"
+    )
+
+    _sweep_org_zombies(db, now=_now(), uptime=999, warm_up_seconds=30,
+                       orchestrator=orch)
+    replay_logs = db.get_audit_logs("T-ZOMBIE-SUP")
+    assert [row["action"] for row in replay_logs].count("orchestration_step") == 1
+    assert [row["action"] for row in replay_logs].count("escalation") == 1
 
 
 # ---------------------------------------------------------------------------

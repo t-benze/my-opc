@@ -3,10 +3,13 @@
 Founder ruling (THR-195 seq 129): workspace cleanup is a **daemon-managed,
 system-default capability** that runs on its own without user configuration and
 independent of all user Schedules. The daemon periodically measures each agent
-workspace and — when the owner's workspace total is at or above the founder
-threshold and the TASK-5552 / THR-195 contract says cleanup investigation is
-warranted — triggers an ordinary root task for that owning agent with the
-fresh measurement packed as advisory context at trigger time. It never uses,
+workspace. When measurement is available, only a numeric result below the
+1 GiB founder threshold skips. A bounded timeout, error, or cap/truncation
+result that makes measurement unavailable bypasses only numeric threshold
+evaluation; otherwise-due spawning continues with honest unavailable advisory
+context. The daemon triggers an ordinary root task for that owning agent when
+the remaining TASK-5552 / THR-195 contract says cleanup investigation is
+warranted. It never uses,
 creates, or modifies a Schedule, never injects anything into the shared
 session-prompt seam, and never performs cleanup itself.
 
@@ -19,8 +22,11 @@ forward.
 
 Founder-approved product defaults (TASK-6036, resolving the TASK-6029 stop
 analysis): daemon-managed system cleanup independent of user Schedules; weekly
-Sunday 03:30 in each org's timezone; measure per agent and trigger only when
-that agent's workspace total is >= 1 GiB; the first TWO triggered runs per
+Sunday 03:30 in each org's timezone; measure per agent; only an available
+numeric result below 1 GiB skips, while a bounded timeout, error, or
+cap/truncation result that is unavailable bypasses only numeric threshold
+evaluation and otherwise-due spawning continues with honest unavailable
+advisory context; the first TWO triggered runs per
 agent are strictly report-only; each triggered ordinary task is assigned to
 its owning agent; suppress while that agent has a non-terminal cleanup task
 and apply a seven-day per-agent cooldown; one durable founder-visible report
@@ -58,7 +64,10 @@ Contract-relevant bounds (all documented in protocol/05b + 05c):
 - Trigger: the weekly occurrence is due AND this window is unserviced for the
   agent AND no prior cleanup task of that agent is non-terminal (TASK-5552 §3
   "one run at a time") AND the agent's last cleanup task is older than the
-  seven-day per-agent cooldown AND the agent's workspace measures >= 1 GiB.
+  seven-day per-agent cooldown. Only an available numeric result below 1 GiB
+  skips; a bounded timeout, error, or cap/truncation result that is unavailable
+  bypasses only numeric threshold evaluation, and otherwise-due spawning
+  continues with honest unavailable advisory context.
 - Report-only rollout: the first TWO triggered runs per agent are STRICTLY
   report-only (daemon-composed REPORT-ONLY brief — inventory and nothing
   else). From the third triggered run onward the daemon composes the approved
@@ -244,9 +253,12 @@ class WorkspaceContextSnapshot:
     inode_percent: float = 0.0
     inode_threshold_state: str = "ok"
 
-    def unavailable(self, reason: str) -> "WorkspaceContextSnapshot":
+    def unavailable(
+        self, reason: str, *, truncated: bool = False,
+    ) -> "WorkspaceContextSnapshot":
         return WorkspaceContextSnapshot(
             available=False, reason=reason, measured_at=self.measured_at,
+            truncated=truncated,
         )
 
 
@@ -287,8 +299,12 @@ def format_workspace_context_note(snapshot: WorkspaceContextSnapshot) -> str:
         "",
     ]
     if not snapshot.available:
+        state = (
+            "measurement truncated/unavailable"
+            if snapshot.truncated else "measurement unavailable"
+        )
         lines.append(
-            f"  measurement unavailable at trigger time: {snapshot.reason or 'unknown'}"
+            f"  {state} at trigger time: {snapshot.reason or 'unknown'}"
         )
         lines.append(
             "  No sizing data was packed. This advisory failure does not affect this run."
@@ -354,6 +370,7 @@ class _WorkspaceWalk:
     bytes_total: int = 0
     entries: int = 0
     truncated: bool = False
+    timed_out: bool = False
     errors: int = 0
     dep_count: int = 0
     dep_bytes: int = 0
@@ -388,6 +405,7 @@ def _walk_workspace(
     while stack:
         if time.monotonic() > deadline:
             stats.truncated = True
+            stats.timed_out = True
             break
         current, depth, in_dep, dep_in_wt = stack.pop()
         if depth > max_depth:
@@ -408,6 +426,7 @@ def _walk_workspace(
                 is_symlink = entry.is_symlink()
                 is_dir = entry.is_dir(follow_symlinks=False)
             except OSError:
+                stats.errors += 1
                 continue
             if is_symlink:
                 continue  # never traverse symlinked subtrees
@@ -424,6 +443,7 @@ def _walk_workspace(
                 try:
                     size = entry.stat(follow_symlinks=False).st_size
                 except OSError:
+                    stats.errors += 1
                     continue
                 stats.bytes_total += size
                 if in_dep:
@@ -667,13 +687,18 @@ def _measure(
         max_depth=_MAX_DEPTH,
     )
     if walk.truncated:
-        # Strict fail-closed: partial numbers from a deadline/cap hit are
-        # never presented as a complete measurement.
+        # Partial numbers from a deadline/cap hit are never presented as a
+        # complete measurement. The trigger still fails open and carries
+        # this honest truncated advisory state into the spawned task.
         return snap.unavailable(
             "workspace measurement did not complete within bounded limits "
-            "(timeout or traversal cap)"
+            "(deadline exceeded)"
+            if walk.timed_out else
+            "workspace measurement did not complete within bounded limits "
+            "(traversal cardinality cap exceeded)",
+            truncated=True,
         )
-    if walk.errors and walk.bytes_total == 0:
+    if walk.errors:
         return snap.unavailable("workspace could not be measured (unreadable)")
 
     snap.workspaces_count = 1
@@ -692,7 +717,11 @@ def _measure(
     if wt.timed_out or wt.truncated:
         return snap.unavailable(
             "workspace measurement did not complete within bounded limits "
-            "(timeout or traversal cap)"
+            "(deadline exceeded)"
+            if wt.timed_out else
+            "workspace measurement did not complete within bounded limits "
+            "(worktree cardinality cap exceeded)",
+            truncated=True,
         )
 
     snap.live_sessions_count, snap.live_sessions_agents = _live_sessions(sessions)
@@ -1103,8 +1132,8 @@ async def trigger_cleanup(
     seam into the daemon-composed brief.
 
     Fail-closed skip (returns None, never raises) when: the agent has no team
-    in this org, the fresh measurement is unavailable, the agent's workspace
-    measures below the >= 1 GiB trigger threshold, or the agent's
+    in this org, an available fresh measurement is below the >= 1 GiB trigger
+    threshold, or the agent's
     daemon-marked cleanup-task history cannot be read authoritatively
     (lifecycle/identity uncertainty fails closed). Each skip is audited so
     operators can see why no task was created.
@@ -1168,15 +1197,10 @@ async def trigger_cleanup(
             sessions=org.sessions,
         ),
     )
-    if not snapshot.available:
-        org.db.insert_audit_log(
-            task_id="workspace-cleanup:skipped",
-            agent=agent,
-            action="workspace_cleanup_skipped",
-            payload={"reason": "measurement_unavailable", "agent": agent},
-        )
-        return None
-    if snapshot.workspaces_bytes < _MIN_WORKSPACE_TRIGGER_BYTES:
+    if (
+        snapshot.available
+        and snapshot.workspaces_bytes < _MIN_WORKSPACE_TRIGGER_BYTES
+    ):
         org.db.insert_audit_log(
             task_id="workspace-cleanup:skipped",
             agent=agent,
@@ -1318,6 +1342,8 @@ async def trigger_cleanup(
         payload={
             "report_thread_id": thread_id,
             "measurement_available": snapshot.available,
+            "measurement_reason": snapshot.reason,
+            "measurement_truncated": snapshot.truncated,
             "run_number": run_number,
             "brief_kind": (
                 "report_only" if run_number <= _REPORT_ONLY_RUN_LIMIT
