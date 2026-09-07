@@ -77,9 +77,49 @@ run_id="$(cat /proc/sys/kernel/random/uuid)"
 package_sha="$(sha256sum "$PACKAGE_TAR" | cut -d' ' -f1)"
 python "$evidence_driver" init "$evidence_artifact" --git-head "$PROOF_SUBJECT_SHA" --package-sha256 "$package_sha" --run-id "$run_id"
 headscale_pid=""; peer_pid=""; daemon_pid=""
+safe_systemctl_value() {
+  local unit="$1" property="$2" value
+  value="$(systemctl show "$unit" -p "$property" --value 2>/dev/null || true)"
+  case "$property:$value" in
+    ActiveState:active|ActiveState:inactive|ActiveState:failed|ActiveState:activating|ActiveState:deactivating|ActiveState:unknown|SubState:running|SubState:dead|SubState:failed|SubState:exited|SubState:waiting|Result:success|Result:exit-code|Result:signal|Result:timeout|Result:resources|Result:unknown) printf '%s' "$value" ;;
+    ExecMainStatus:*|ExecStartPre:*) [[ "$value" =~ (status=)?[0-9]{1,6} ]] && printf '%s' "${BASH_REMATCH[0]//status=/}" || printf 'unknown' ;;
+    *) printf 'unknown' ;;
+  esac
+}
+capture_failure_snapshot() {
+  local snapshot="$diagnostics/failure-snapshot.json" unit first=1 active sub result main pre jobs source held marker dropin staging
+  # Best-effort and bounded: no captured observation may replace the failure
+  # status that entered cleanup, and only fixed identifiers/closed values leave.
+  source=false; held=false; marker=false; dropin=false; staging=false
+  sudo test -e /etc/happyranch/enrollment.key && source=true
+  sudo test -e /etc/happyranch/enrollment.key.held && held=true
+  sudo test -e /var/lib/happyranch-tsnet-sidecar/credential.consumed && marker=true
+  sudo test -e /etc/systemd/system/happyranch-tsnet-sidecar.service.d/10-enrollment-credential.conf && dropin=true
+  sudo test -d /run/credentials/happyranch-tsnet-sidecar.service && staging=true
+  {
+    printf '{"schema":"happyranch.n3.failure-snapshot","version":1,"units":{'
+    for unit in happyranch-managed.target happyranch-connector.service happyranch-tsnet-sidecar.service; do
+      active="$(safe_systemctl_value "$unit" ActiveState)"; sub="$(safe_systemctl_value "$unit" SubState)"
+      result="$(safe_systemctl_value "$unit" Result)"; main="$(safe_systemctl_value "$unit" ExecMainStatus)"
+      pre="$(safe_systemctl_value "$unit" ExecStartPre)"
+      (( first )) || printf ','; first=0
+      printf '"%s":{"active":"%s","sub":"%s","result":"%s","exec_main_status":"%s","exec_start_pre_status":"%s"}' "$unit" "$active" "$sub" "$result" "$main" "$pre"
+    done
+    printf '},"jobs":['
+    first=1
+    while read -r job unit _kind state; do
+      case "$job:$unit:$state" in
+        [0-9]*:happyranch-managed.target:waiting|[0-9]*:happyranch-managed.target:running|[0-9]*:happyranch-connector.service:waiting|[0-9]*:happyranch-connector.service:running|[0-9]*:happyranch-tsnet-sidecar.service:waiting|[0-9]*:happyranch-tsnet-sidecar.service:running)
+          (( first )) || printf ','; first=0; printf '{"id":%s,"unit":"%s","state":"%s"}' "$job" "$unit" "$state" ;;
+      esac
+    done < <(timeout 3 systemctl list-jobs --no-legend --plain 2>/dev/null || true)
+    printf '],"credential_presence":{"source":%s,"held_source":%s,"consumed_marker":%s,"transient_dropin":%s,"staged_directory":%s}}\n' "$source" "$held" "$marker" "$dropin" "$staging"
+  } >"$snapshot" || true
+}
 cleanup() {
   local original_status=$? cleanup_failed=0
   set +e
+  (( original_status == 0 )) || capture_failure_snapshot || true
   sudo systemctl stop happyranch-managed.target
   if [[ -n "${sidecar_ip:-}" ]] && [[ -n "$peer_pid" ]] && sudo kill -0 "$peer_pid" 2>/dev/null; then
     ! tsnet_open || cleanup_failed=1
@@ -362,7 +402,13 @@ sudo mv /etc/happyranch/enrollment.key.held /etc/happyranch/enrollment.key
 # sandbox dimension fail closed, without a harness-created drop-in.
 capture_denial_matrix shipping-unit
 
-sudo systemctl start happyranch-managed.target
+if sudo systemctl start happyranch-managed.target; then
+  :
+else
+  start_status=$?
+  capture_failure_snapshot || true
+  exit "$start_status"
+fi
 wait_for "connector READY" active happyranch-connector.service
 wait_for "sidecar READY and ExpectedPeers" active happyranch-tsnet-sidecar.service
 connector_ready="$(systemctl show happyranch-connector.service -p ActiveEnterTimestampMonotonic --value)"

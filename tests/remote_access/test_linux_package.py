@@ -243,6 +243,71 @@ def test_real_systemd_denial_matrix_executes_every_bounded_probe() -> None:
         assert sandbox_property in harness
 
 
+def _run_real_systemd_failure_snapshot(tmp_path: Path, *, malformed: bool = False) -> subprocess.CompletedProcess[str]:
+    harness = Path("app/linux/package/real_systemd_n3.sh").read_text()
+    snapshot_helpers = "safe_systemctl_value() {" + harness.split("safe_systemctl_value() {", 1)[1].split("\ncleanup() {", 1)[0]
+    script = f'''set -euo pipefail
+diagnostics={tmp_path!s}; mkdir -p "$diagnostics"
+sudo() {{ "$@"; }}
+timeout() {{ shift; "$@"; }}
+systemctl() {{
+  if [[ $1 == show ]]; then
+    case $4 in
+      ActiveState) printf '%s\\n' "${{MALFORMED:+SECRET_CANARY}}${{MALFORMED:-failed}}" ;;
+      SubState) printf '%s\\n' failed ;;
+      Result) printf '%s\\n' exit-code ;;
+      ExecMainStatus) printf '%s\\n' 17 ;;
+      ExecStartPre) printf '%s\\n' 'path=/secret status=19 command=SECRET_CANARY' ;;
+    esac
+  elif [[ $1 == list-jobs ]]; then
+    printf '%s\\n' '42 happyranch-connector.service start running' '99 unrelated.service start waiting'
+  fi
+}}
+{snapshot_helpers}
+capture_failure_snapshot
+cat "$diagnostics/failure-snapshot.json"
+'''
+    return subprocess.run(
+        ["bash", "-c", script], capture_output=True, text=True,
+        env=os.environ | ({"MALFORMED": "1"} if malformed else {}), check=False,
+    )
+
+
+def test_real_systemd_failure_snapshot_executes_extracted_shipping_code_and_is_secret_free(tmp_path: Path) -> None:
+    result = _run_real_systemd_failure_snapshot(tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert "SECRET_CANARY" not in result.stdout + result.stderr
+    snapshot = json.loads(result.stdout)
+    assert snapshot["units"]["happyranch-connector.service"] == {
+        "active": "failed", "sub": "failed", "result": "exit-code",
+        "exec_main_status": "17", "exec_start_pre_status": "19",
+    }
+    assert snapshot["jobs"] == [{"id": 42, "unit": "happyranch-connector.service", "state": "running"}]
+    assert snapshot["credential_presence"] == {
+        "source": False, "held_source": False, "consumed_marker": False,
+        "transient_dropin": False, "staged_directory": False,
+    }
+
+
+def test_real_systemd_failure_snapshot_bounds_malformed_observations(tmp_path: Path) -> None:
+    result = _run_real_systemd_failure_snapshot(tmp_path, malformed=True)
+    assert result.returncode == 0, result.stderr
+    assert "SECRET_CANARY" not in result.stdout + result.stderr
+    snapshot = json.loads(result.stdout)
+    assert {unit["active"] for unit in snapshot["units"].values()} == {"unknown"}
+
+
+def test_real_systemd_failure_capture_precedes_teardown_and_preserves_start_status() -> None:
+    harness = Path("app/linux/package/real_systemd_n3.sh").read_text()
+    cleanup_capture = harness.index("(( original_status == 0 )) || capture_failure_snapshot || true")
+    teardown = harness.index("sudo systemctl stop happyranch-managed.target", cleanup_capture)
+    guarded_start = harness.index("if sudo systemctl start happyranch-managed.target; then")
+    capture = harness.index("capture_failure_snapshot || true", guarded_start)
+    preserved_status = harness.index('exit "$start_status"', capture)
+    assert cleanup_capture < teardown
+    assert guarded_start < capture < preserved_status
+
+
 def _run_real_systemd_shipping_cleanup(tmp_path: Path, **env: str) -> subprocess.CompletedProcess[str]:
     harness = Path("app/linux/package/real_systemd_n3.sh").read_text()
     unit_helpers = "systemctl_absent_value() {" + harness.split("systemctl_absent_value() {", 1)[1].split("\ndiagnostics=", 1)[0]
