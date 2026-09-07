@@ -1,5 +1,6 @@
 import { useData } from '@/design-system/providers/DataContext';
 export type { AuthorityPolicyTemplate } from '@/lib/api/authorityPolicy';
+export { isEligiblePolicyManager } from '@/lib/api/authorityPolicy';
 
 export const useTeamEscalationPolicy: ReturnType<typeof useData>['authorityPolicy']['useTeamEscalationPolicy'] =
   (agent) => useData().authorityPolicy.useTeamEscalationPolicy(agent);

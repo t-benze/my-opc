@@ -13,6 +13,7 @@ import { Sidebar } from '@/design-system/layouts/AppShell/Sidebar';
 import { useOrgsList } from '@/hooks/orgs';
 import { OrgProvider } from '@/lib/orgSlug';
 import { AgentsPage } from '@/features/agents/AgentsPage';
+import { TeamEscalationPolicyPage } from '@/features/agents/TeamEscalationPolicyPage';
 import { ArtifactsPage } from '@/features/artifacts/ArtifactsPage';
 import { JobsPage } from '@/features/jobs/JobsPage';
 import { JobDetailPage } from '@/features/jobs/JobDetailPage';
@@ -119,6 +120,7 @@ export function AppRoutes(): JSX.Element {
           <Route path="skills/:skillId" element={<SkillDetailPage />} />
           <Route path="agents" element={<AgentsPage />} />
           <Route path="agents/:agent_name" element={<AgentsPage />} />
+          <Route path="agents/:agent_name/team-escalation-policy" element={<TeamEscalationPolicyPage />} />
           <Route path="jobs" element={<JobsPage />} />
           <Route path="jobs/:job_id" element={<JobDetailPage />} />
           <Route path="health" element={<HealthPage />} />

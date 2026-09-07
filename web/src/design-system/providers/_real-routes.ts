@@ -50,6 +50,8 @@ export function useRealAgentsRoutes(): AgentsRoutes {
     pending: () => (slug ? `/orgs/${slug}/agents?view=pending` : '#'),
     detail: (agentName: string) =>
       slug ? `/orgs/${slug}/agents/${agentName}` : '#',
+    policy: (agentName: string) =>
+      slug ? `/orgs/${slug}/agents/${agentName}/team-escalation-policy` : '#',
     inboxForOrg: (target: string) => `/orgs/${target}/agents`,
   };
 }

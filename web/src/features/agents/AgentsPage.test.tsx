@@ -2,8 +2,8 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import userEvent from '@testing-library/user-event';
 import { QueryClient } from '@tanstack/react-query';
 import { http, HttpResponse } from 'msw';
-import { MemoryRouter } from 'react-router-dom';
-import { beforeEach, describe, expect, test } from 'vitest';
+import { createMemoryRouter, Link, MemoryRouter, RouterProvider, useNavigate } from 'react-router-dom';
+import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { AppProvider } from '@/design-system/providers/AppProvider';
 import { AppRoutes } from '@/routes';
 import { renderWithProviders } from '@/test/render';
@@ -11,6 +11,11 @@ import { server } from '@/test/server';
 import type { JobRecord } from '@/lib/api/types';
 
 const SLUG = 'hk-macau-tourism';
+const NativeRequest = globalThis.Request;
+
+afterEach(() => {
+  globalThis.Request = NativeRequest;
+});
 
 const AGENTS_PAYLOAD = {
   agents: [
@@ -84,6 +89,39 @@ function stubDetailHandlers(agentTasks: unknown[] = []) {
 function mountAt(route: string) {
   sessionStorage.setItem('happyranch.token', 'tok');
   return renderWithProviders(<AppRoutes />, { route });
+}
+
+function PolicyNavigationControls(): JSX.Element {
+  const navigate = useNavigate();
+  return <div className="sr-only">
+    <Link to={`/orgs/${SLUG}/dashboard`}>Test destination</Link>
+    <button onClick={() => navigate(-1)}>Test browser back</button>
+    <button onClick={() => navigate(1)}>Test browser forward</button>
+    <button onClick={() => navigate(0)}>Test browser refresh</button>
+  </div>;
+}
+
+function mountPolicyRoute(entries: string[], initialIndex = entries.length - 1) {
+  // React Router's data-memory history creates a Request with jsdom's
+  // AbortSignal, which Node's undici Request rejects. Navigation loaders are
+  // not used in this app, so omit that test-environment-only signal.
+  globalThis.Request = class RouterTestRequest extends NativeRequest {
+    constructor(input: RequestInfo | URL, init?: RequestInit) {
+      super(input, init ? { ...init, signal: undefined } : init);
+    }
+  };
+  sessionStorage.setItem('happyranch.token', 'tok');
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const router = createMemoryRouter([{
+    path: '*',
+    element: <AppProvider client={client}><PolicyNavigationControls /><AppRoutes /></AppProvider>,
+  }], { initialEntries: entries, initialIndex });
+  const view = render(<RouterProvider router={router} />);
+  return { ...view, client };
+}
+
+function policyCacheEntries(client: QueryClient) {
+  return client.getQueryCache().getAll().filter((query) => String(query.queryKey[0]).startsWith('team-escalation-policy'));
 }
 
 describe('AgentsPage — two-pane roster list', () => {
@@ -231,6 +269,24 @@ describe('AgentsPage — two-pane roster list', () => {
 });
 
 describe('AgentDetailPane — editable fields', () => {
+  test('eligible manager detail shows only compact active status and dedicated-page control', async () => {
+    stubBaseHandlers(); stubDetailHandlers();
+    const manager = { ...AGENTS_PAYLOAD.agents[0], name: 'engineering_manager' };
+    server.use(
+      http.get(`/api/v1/orgs/${SLUG}/agents`, () => HttpResponse.json({ agents: [manager] })),
+      http.get(`/api/v1/orgs/${SLUG}/agents/engineering_manager/team-escalation-policy`, () => HttpResponse.json({
+        team: 'engineering', target_manager: 'engineering_manager', can_mutate: true,
+        bootstrap_template: { title: 'Canonical policy', normative_text: 'Policy', clauses: [], continuation_phrase: 'routine same-root follow-through of the already-completed slice' },
+        active: { epoch: 4, release: { version: 2, digest: 'abcdef1234567890' } },
+      })),
+    );
+    mountAt(`/orgs/${SLUG}/agents/engineering_manager`);
+    expect(await screen.findByText(/Active v2 · epoch 4 · abcdef123456/)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Open team escalation policy' })).toHaveAttribute('href', `/orgs/${SLUG}/agents/engineering_manager/team-escalation-policy`);
+    expect(screen.queryByLabelText('Title')).not.toBeInTheDocument();
+    expect(screen.queryByText('Immutable release history')).not.toBeInTheDocument();
+  });
+
   test('omits the team policy card from a worker detail pane', async () => {
     stubBaseHandlers();
     stubDetailHandlers();
@@ -1389,6 +1445,189 @@ describe('AgentsPage — route collision regression', () => {
     await waitFor(() =>
       expect(screen.getByText('worker')).toBeInTheDocument(),
     );
+  });
+});
+
+describe('Team escalation policy dedicated route', () => {
+  const manager = {
+    name: 'engineering_manager', team: 'engineering', role: 'manager',
+    executor: 'codex', model: null, description: 'Owns engineering.', repos: {}, system_prompt: 'Manager.',
+  };
+  const policyResponse = {
+    team: 'engineering', target_manager: 'engineering_manager', can_mutate: true,
+    bootstrap_required: true,
+    bootstrap_template: { title: 'Canonical policy', normative_text: 'Policy', clauses: [], continuation_phrase: 'routine same-root follow-through of the already-completed slice' },
+  };
+
+  function stubPolicy() {
+    server.use(
+      http.get(`/api/v1/orgs/${SLUG}/agents/engineering_manager/team-escalation-policy`, () => HttpResponse.json(policyResponse)),
+      http.get(`/api/v1/orgs/${SLUG}/agents/engineering_manager/team-escalation-policy/history`, () => HttpResponse.json({ items: [], next_cursor: null })),
+      http.get(`/api/v1/orgs/${SLUG}/agents/engineering_manager/team-escalation-policy/outcomes`, () => HttpResponse.json({ items: [], next_cursor: null })),
+    );
+  }
+
+  test('eligible deep link resolves after roster eligibility and provides context/back link', async () => {
+    stubBaseHandlers();
+    server.use(
+      http.get(`/api/v1/orgs/${SLUG}/agents`, () => HttpResponse.json({ agents: [manager] })),
+      http.get(`/api/v1/orgs/${SLUG}/agents/engineering_manager/team-escalation-policy`, () => HttpResponse.json(policyResponse)),
+      http.get(`/api/v1/orgs/${SLUG}/agents/engineering_manager/team-escalation-policy/history`, () => HttpResponse.json({ items: [], next_cursor: null })),
+      http.get(`/api/v1/orgs/${SLUG}/agents/engineering_manager/team-escalation-policy/outcomes`, () => HttpResponse.json({ items: [], next_cursor: null })),
+    );
+    mountPolicyRoute([`/orgs/${SLUG}/agents/engineering_manager/team-escalation-policy`]);
+    expect(await screen.findByRole('heading', { level: 1, name: 'Team escalation policy' })).toBeInTheDocument();
+    expect(screen.getAllByRole('main')).toHaveLength(1);
+    expect(screen.getByText('Engineering · Engineering Manager')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /Back to Engineering Manager/ })).toHaveAttribute('href', `/orgs/${SLUG}/agents/engineering_manager`);
+    expect(await screen.findByLabelText('Title')).toBeInTheDocument();
+  });
+
+  test('eligible manager exercises the shipping navigate(0) browser-refresh path without a replacement router', async () => {
+    stubBaseHandlers();
+    let rosterRequests = 0;
+    let policyRequests = 0;
+    server.use(
+      http.get(`/api/v1/orgs/${SLUG}/agents`, () => {
+        rosterRequests += 1;
+        return HttpResponse.json({ agents: [manager] });
+      }),
+      http.get(`/api/v1/orgs/${SLUG}/agents/engineering_manager/team-escalation-policy`, () => {
+        policyRequests += 1;
+        return HttpResponse.json(policyResponse);
+      }),
+      http.get(`/api/v1/orgs/${SLUG}/agents/engineering_manager/team-escalation-policy/history`, () => HttpResponse.json({ items: [], next_cursor: null })),
+      http.get(`/api/v1/orgs/${SLUG}/agents/engineering_manager/team-escalation-policy/outcomes`, () => HttpResponse.json({ items: [], next_cursor: null })),
+    );
+    const user = userEvent.setup();
+    mountPolicyRoute([`/orgs/${SLUG}/agents/engineering_manager/team-escalation-policy`]);
+    expect(await screen.findByLabelText('Title')).toHaveValue('Canonical policy');
+    expect(rosterRequests).toBe(1);
+    expect(policyRequests).toBe(1);
+
+    await user.click(screen.getByRole('button', { name: 'Test browser refresh' }));
+
+    // In a real browser navigate(0) reloads the document. Memory history keeps
+    // the mounted document, so this assertion deliberately proves the shipping
+    // refresh call path without substituting an unmount or replacement router.
+    expect(rosterRequests).toBe(1);
+    expect(policyRequests).toBe(1);
+    expect(screen.getByRole('heading', { level: 1, name: 'Team escalation policy' })).toBeInTheDocument();
+    expect(screen.getByLabelText('Title')).toHaveValue('Canonical policy');
+  });
+
+  test('shipping back Link cancel preserves the exact dirty draft; confirm discards and navigates', async () => {
+    stubBaseHandlers();
+    server.use(http.get(`/api/v1/orgs/${SLUG}/agents`, () => HttpResponse.json({ agents: [manager] })));
+    stubPolicy();
+    const user = userEvent.setup();
+    mountPolicyRoute([`/orgs/${SLUG}/agents/engineering_manager/team-escalation-policy`]);
+    const title = await screen.findByRole('textbox', { name: 'Title' });
+    await user.clear(title);
+    await user.type(title, 'Exact retained draft');
+    await user.click(screen.getByRole('link', { name: /Back to Engineering Manager/ }));
+    const dialog = await screen.findByRole('dialog', { name: 'Discard unsaved policy changes?' });
+    await user.click(within(dialog).getByRole('button', { name: 'Stay on page' }));
+    expect(screen.getByRole('textbox', { name: 'Title' })).toHaveValue('Exact retained draft');
+    expect(screen.getByRole('heading', { level: 1, name: 'Team escalation policy' })).toBeInTheDocument();
+
+    await user.click(screen.getByRole('link', { name: /Back to Engineering Manager/ }));
+    await user.click(await screen.findByRole('button', { name: 'Discard and continue' }));
+    await waitFor(() => expect(screen.queryByRole('heading', { level: 1, name: 'Team escalation policy' })).not.toBeInTheDocument());
+    expect(screen.queryByDisplayValue('Exact retained draft')).not.toBeInTheDocument();
+  });
+
+  test('memory history back cancel preserves draft and confirm completes the original POP; forward restores route cleanly', async () => {
+    stubBaseHandlers();
+    server.use(http.get(`/api/v1/orgs/${SLUG}/agents`, () => HttpResponse.json({ agents: [manager] })));
+    stubDetailHandlers();
+    stubPolicy();
+    const user = userEvent.setup();
+    mountPolicyRoute([
+      `/orgs/${SLUG}/agents/engineering_manager`,
+      `/orgs/${SLUG}/agents/engineering_manager/team-escalation-policy`,
+    ]);
+    const title = await screen.findByRole('textbox', { name: 'Title' });
+    await user.clear(title);
+    await user.type(title, 'History-retained draft');
+    await user.click(screen.getByRole('button', { name: 'Test browser back' }));
+    await user.click(await screen.findByRole('button', { name: 'Stay on page' }));
+    expect(screen.getByRole('textbox', { name: 'Title' })).toHaveValue('History-retained draft');
+    await user.click(screen.getByRole('button', { name: 'Test browser back' }));
+    await user.click(await screen.findByRole('button', { name: 'Discard and continue' }));
+    await waitFor(() => expect(screen.queryByRole('heading', { level: 1, name: 'Team escalation policy' })).not.toBeInTheDocument());
+    await user.click(screen.getByRole('button', { name: 'Test browser forward' }));
+    expect(await screen.findByRole('textbox', { name: 'Title' })).toHaveValue('Canonical policy');
+  });
+
+  test('refresh/hard unload is guarded separately while dirty', async () => {
+    stubBaseHandlers();
+    server.use(http.get(`/api/v1/orgs/${SLUG}/agents`, () => HttpResponse.json({ agents: [manager] })));
+    stubPolicy();
+    const user = userEvent.setup();
+    mountPolicyRoute([`/orgs/${SLUG}/agents/engineering_manager/team-escalation-policy`]);
+    const title = await screen.findByRole('textbox', { name: 'Title' });
+    await user.type(title, ' dirty');
+    const unload = new Event('beforeunload', { cancelable: true });
+    window.dispatchEvent(unload);
+    expect(unload.defaultPrevented).toBe(true);
+  });
+
+  test('worker deep link fails closed without any policy request or policy wording', async () => {
+    stubBaseHandlers();
+    let policyRequests = 0;
+    server.use(
+      http.all(`/api/v1/orgs/${SLUG}/agents/:agentName/team-escalation-policy*`, () => { policyRequests += 1; return new HttpResponse(null, { status: 500 }); }),
+    );
+    mountPolicyRoute([`/orgs/${SLUG}/agents/support_agent/team-escalation-policy`]);
+    expect(await screen.findByText(/Not found/)).toBeInTheDocument();
+    expect(screen.queryByText(/team escalation policy/i)).not.toBeInTheDocument();
+    expect(policyRequests).toBe(0);
+  });
+
+  test.each([
+    ['worker', [{ ...manager, name: 'engineering_manager', role: 'worker' }]],
+    ['other manager', [{ ...manager, name: 'engineering_manager', team: 'support' }]],
+    ['unknown target', [manager]],
+    ['stale or deleted manager', []],
+  ])('%s direct link has no request binding, cache entry/data, policy DOM, or payload', async (kind, roster) => {
+    stubBaseHandlers();
+    const target = kind === 'unknown target' ? 'missing_manager' : 'engineering_manager';
+    server.use(http.get(`/api/v1/orgs/${SLUG}/agents`, () => HttpResponse.json({ agents: roster })));
+    let networkRequests = 0;
+    server.use(http.all(`/api/v1/orgs/${SLUG}/agents/:agentName/team-escalation-policy*`, () => {
+      networkRequests += 1;
+      return new HttpResponse(null, { status: 500 });
+    }));
+    const { client } = mountPolicyRoute([`/orgs/${SLUG}/agents/${target}/team-escalation-policy`]);
+    expect(await screen.findByText(/Not found/)).toBeInTheDocument();
+    expect(networkRequests).toBe(0);
+    expect(policyCacheEntries(client)).toEqual([]);
+    expect(document.body).not.toHaveTextContent(/team escalation policy|canonical policy|shared local operator|save immutable|activate/i);
+  });
+
+  test('unresolved and errored rosters expose no policy request, cache key/data, DOM, or payload', async () => {
+    stubBaseHandlers();
+    let resolveRoster!: (value: Response) => void;
+    let policyRequests = 0;
+    server.use(
+      http.get(`/api/v1/orgs/${SLUG}/agents`, () => new Promise<Response>((resolve) => { resolveRoster = resolve; })),
+      http.all(`/api/v1/orgs/${SLUG}/agents/:agentName/team-escalation-policy*`, () => {
+        policyRequests += 1;
+        return HttpResponse.json(policyResponse);
+      }),
+    );
+    const first = mountPolicyRoute([`/orgs/${SLUG}/agents/engineering_manager/team-escalation-policy`]);
+    expect(await screen.findByText('Loading agent…')).toBeInTheDocument();
+    expect(policyRequests).toBe(0);
+    expect(policyCacheEntries(first.client)).toEqual([]);
+    expect(document.body).not.toHaveTextContent(/team escalation policy|canonical policy|shared local operator|save immutable|activate/i);
+
+    resolveRoster(new Response(null, { status: 503 }));
+    expect(await screen.findByText(/Not found/)).toBeInTheDocument();
+    expect(policyRequests).toBe(0);
+    expect(policyCacheEntries(first.client)).toEqual([]);
+    expect(document.body).not.toHaveTextContent(/team escalation policy|canonical policy|shared local operator|save immutable|activate/i);
   });
 });
 
