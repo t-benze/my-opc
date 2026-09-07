@@ -373,8 +373,9 @@ through the S1 store's sealed CAS, exact replay, stale-epoch, same-team, audit,
 and older-version rollback checks without exposing guessed release existence
 as a distinct oracle. Shipping the route is not production activation.
 
-**S6b/S7 projection and activation.** The authenticated Engineering
-Manager surface exposes bounded stable snapshot/keyset pagination, with opaque
+**S6b/S7 projection and activation.** The eligible Engineering Manager Agent
+detail exposes only a compact entry/status card. Its dedicated authenticated
+org/agent-scoped policy route exposes bounded stable snapshot/keyset pagination, with opaque
 independent cursors and deterministic tie-breakers, for immutable release and
 activation receipts plus secret-free self-evaluation outcomes. Concurrent
 newer inserts are outside the initial traversal snapshot and cannot shift,

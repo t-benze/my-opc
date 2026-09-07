@@ -469,8 +469,9 @@ The signed architecture is at
 **THR-181 S6b/S7 manager runtime visibility.** A newly launched eligible
 Engineering Manager remains the semantic evaluator for its own proposed
 decision; no separate production evaluator process is launched. The manager
-Agent page may read only bounded secret-free immutable history and durable
-outcome receipts, with missing causal linkage explicitly marked
+Agent detail shows only a compact eligible entry/status card. Its dedicated
+org/agent-scoped policy page may read only bounded secret-free immutable history
+and durable outcome receipts, with missing causal linkage explicitly marked
 `receipt_incomplete`. Workers and other managers receive no API or DOM surface.
 Code landing/redeploy and explicit founder-authorized production activation are
 separate events; activation retains the ordinary daemon mechanical fences.

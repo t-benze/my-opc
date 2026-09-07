@@ -410,6 +410,7 @@ export interface AgentsRoutes {
   inbox: () => string;
   pending: () => string;
   detail: (agentName: string) => string;
+  policy: (agentName: string) => string;
   inboxForOrg: (slug: string) => string;
 }
 

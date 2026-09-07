@@ -5,6 +5,10 @@ The web surface is currently available only for the roster-confirmed
 workers and every other manager receive the same `policy_surface_not_available`
 404 and their Agent response and DOM contain no policy surface.
 
+The eligible Agent detail contains a compact manager-only entry and active-status
+card. The full editor, immutable history, and self-evaluation outcomes live on
+the dedicated `/orgs/:slug/agents/:agent_name/team-escalation-policy` route.
+
 `GET .../team-escalation-policy/history` and `/outcomes` accept an opaque
 server cursor and `1 <= limit <= 50`. The first request omits `cursor`; its
 response cursor binds every later page to that initial snapshot and to a

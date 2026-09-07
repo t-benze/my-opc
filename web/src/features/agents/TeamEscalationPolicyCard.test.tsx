@@ -78,6 +78,18 @@ describe('TeamEscalationPolicyCard', () => {
     expect(screen.getByRole('button', { name: 'Save & activate' })).toBeDisabled();
   });
 
+  it('warns on refresh while dirty and removes the warning after a true unmount', async () => {
+    const view = render(<TeamEscalationPolicyCard agent={agent} />);
+    fireEvent.change(await screen.findByLabelText('Title'), { target: { value: 'Unsaved policy' } });
+    const dirtyEvent = new Event('beforeunload', { cancelable: true });
+    window.dispatchEvent(dirtyEvent);
+    expect(dirtyEvent.defaultPrevented).toBe(true);
+    view.unmount();
+    const cleanEvent = new Event('beforeunload', { cancelable: true });
+    window.dispatchEvent(cleanEvent);
+    expect(cleanEvent.defaultPrevented).toBe(false);
+  });
+
   it('preserves dirty draft on conflict and saves an immutable inactive version', async () => {
     create.mutateAsync.mockRejectedValueOnce(new ApiError(409, 'base_release_changed', {}));
     render(<TeamEscalationPolicyCard agent={agent} />);
@@ -195,7 +207,7 @@ describe('TeamEscalationPolicyCard', () => {
     render(<TeamEscalationPolicyCard agent={agent} />);
     fireEvent.change(await screen.findByLabelText('Title'), { target: { value: 'Edited policy' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save & activate' }));
-    expect(screen.getByRole('dialog', { name: 'activate policy confirmation' })).toBeInTheDocument();
+    expect(screen.getByRole('dialog', { name: 'Confirm policy activation' })).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
     await waitFor(() => expect(activate.mutateAsync).toHaveBeenCalledWith({
       agentName: 'engineering_manager',

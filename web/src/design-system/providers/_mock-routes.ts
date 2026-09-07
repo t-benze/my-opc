@@ -26,6 +26,7 @@ export function useMockAgentsRoutes(): AgentsRoutes {
     inbox: () => PROTOTYPE_BASE,
     pending: () => PROTOTYPE_BASE,
     detail: () => PROTOTYPE_BASE,
+    policy: () => PROTOTYPE_BASE,
     inboxForOrg: () => PROTOTYPE_BASE,
   };
 }

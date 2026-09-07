@@ -30,7 +30,7 @@ import { useJobsList } from '@/hooks/jobs';
 import { useDensity } from '@/hooks/density';
 import { AgentAvatar } from './AgentAvatar';
 import { useExecutorOptions } from './useExecutorOptions';
-import { TeamEscalationPolicyCard } from './TeamEscalationPolicyCard';
+import { TeamEscalationPolicyEntryCard } from './TeamEscalationPolicyCard';
 
 interface AgentDetailPaneProps {
   agentName: string;
@@ -369,7 +369,7 @@ export function AgentDetailPane({ agentName, onClose, onStartThread }: AgentDeta
       {/* --- Editable fields — Pasture card sections --- */}
       <div className="flex-1 space-y-5 overflow-y-auto px-5 py-4">
         {agent?.role === 'manager' && agent.team === 'engineering' && agent.name === 'engineering_manager' && (
-          <TeamEscalationPolicyCard agent={{ name: agent.name, team: agent.team, role: agent.role }} />
+          <TeamEscalationPolicyEntryCard agent={{ name: agent.name, team: agent.team, role: agent.role }} />
         )}
         {/* Executor — live-derived dropdown (same source as AddAgentDialog) */}
         <section className="bg-surface border-border-default shadow-pasture-sm rounded-lg border p-4">
